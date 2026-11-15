@@ -48,9 +48,13 @@ type Server struct {
 	agentNativeQueue                                 agentNativeQueue
 	macSetupProjectsChecked                          time.Time
 	macSetupProjectsAttempt                          time.Time
+	macSetupSharingConfirmed                         bool
+	macSetupSharingAttempt                           time.Time
+	macSetupSharingStatus                            macOSScreenSharingStatus
 	macProjectsRetryAt                               time.Time
 	macLoginLease                                    *macLoginLease
 	macosGuest                                       *guestos.MacOSProfile
+	screenSharing                                    macOSScreenSharing
 	macResources                                     macOSResourceObserver
 	windowsGuest                                     *guestos.WindowsProfile
 	windowsState                                     windowsGuestState
@@ -413,6 +417,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/environment/resources", s.applyResources)
 	mux.HandleFunc("POST /api/environment/update", s.updateEnvironment)
 	mux.HandleFunc("POST /api/environment/tools", s.updateEnvironmentTools)
+	mux.HandleFunc("POST /api/environment/macos-screen-sharing", s.openMacOSScreenSharing)
 	mux.HandleFunc("GET /api/appearance", s.getAppearance)
 	mux.HandleFunc("GET /api/favorites", s.serveFavorites)
 	mux.HandleFunc("POST /api/favorites", s.serveFavorites)
