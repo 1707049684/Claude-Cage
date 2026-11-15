@@ -367,7 +367,7 @@ internal static class ClaudeWindowRpc
                     if (value["after"]?.GetValue<string>() == sequence)
                         await Protocol.Write(stream, new JsonObject { ["unchanged"] = true, ["sequence"] = sequence }, token);
                     else
-                        await Protocol.Write(stream, new JsonObject { ["png"] = Convert.ToBase64String(bytes), ["sequence"] = sequence, ["width"] = w.Bounds.Right, ["height"] = w.Bounds.Bottom, ["target"] = target, ["density"] = GetDpiForWindow(w.Handle) / 96.0 }, token);
+                        await Protocol.Write(stream, new JsonObject { ["jpeg"] = Convert.ToBase64String(bytes), ["sequence"] = sequence, ["width"] = w.Bounds.Right, ["height"] = w.Bounds.Bottom, ["target"] = target, ["density"] = GetDpiForWindow(w.Handle) / 96.0 }, token);
                     continue;
                 }
                 if (action == "resize")
@@ -521,7 +521,7 @@ internal static class ClaudeWindowRpc
         }
         return first;
     }
-    private static byte[] Capture(Window w) => ClaudeGraphicsCapture.Capture(w.Handle,w.Process.Id,w.Bounds.Right,w.Bounds.Bottom,()=>Validate(w,false)).GetAwaiter().GetResult();
+    private static byte[] Capture(Window w) => ClaudeGraphicsCapture.Capture(w.Handle,w.Process.Id,w.Bounds.Right,w.Bounds.Bottom,()=>Validate(w,false),jpeg:true).GetAwaiter().GetResult();
     private static Input Wheel(int amount, bool horizontal = false) => new() { Data = new InputData { Mouse = new Mouse { Flags = horizontal ? 0x1000u : 0x800u, Data = unchecked((uint)amount) } } };
     private static Input Unicode(char c, bool up) => new() { Type = 1, Data = new InputData { Keyboard = new Keyboard { Scan = c, Flags = 4u | (up ? 2u : 0u) } } };
     private static Input KeyInput(ushort key, bool down) => new() { Type = 1, Data = new InputData { Keyboard = new Keyboard { Key = key, Flags = down ? 0u : 2u } } };
