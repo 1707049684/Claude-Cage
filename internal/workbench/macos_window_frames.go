@@ -124,7 +124,6 @@ func (s *Server) macOSWindowFrames(w http.ResponseWriter, r *http.Request) {
 	defer func() { cancel(); input.Close(); output.Close(); _ = cmd.Wait() }()
 	browser := macOSBrowserWindowRoute(r)
 	metrics := newFrameMetrics(map[bool]string{true: "browser", false: "claude"}[browser], s.recordFrameMetrics)
-	defer metrics.flush(true)
 	relayMacOSFrames(ctx, ws, input, output, browser, metrics)
 }
 

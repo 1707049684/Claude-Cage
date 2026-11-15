@@ -12,6 +12,8 @@ import (
 )
 
 // frameMetricsWindow bounds how often a busy window view writes a summary.
+// Summaries are written only when a window elapses during activity, never on
+// disconnect: a stream may close while its profile directory is being removed.
 const frameMetricsWindow = 10 * time.Second
 
 // frameMetrics summarizes one guest window stream: how long the guest waited

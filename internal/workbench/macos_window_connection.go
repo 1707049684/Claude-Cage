@@ -110,7 +110,6 @@ func (s *Server) macOSWindowConnection(w http.ResponseWriter, r *http.Request) {
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 64<<10), 12<<20)
 	metrics := newInputMetrics(s.recordInputMetrics)
-	defer metrics.flush(true)
 	for {
 		var message struct {
 			ID      uint64             `json:"id"`
