@@ -87,22 +87,15 @@ func (o Options) ValidatePlatform(platform string) error {
 	return nil
 }
 
-// Request GPU rasterization and zero-copy uploads for explicit hardware
-// backends. Chromium still decides availability from the driver and blocklist.
-var hardwareAccelerationFlags = []string{
-	"--enable-gpu-rasterization",
-	"--enable-zero-copy",
-}
-
 func (p *Profile) GraphicsFlags() []string {
 	if p == nil {
 		return nil
 	}
 	switch p.GraphicsBackend {
 	case "metal", "d3d11", "vulkan":
-		return append([]string{"--use-gl=angle", "--use-angle=" + p.GraphicsBackend}, hardwareAccelerationFlags...)
+		return []string{"--use-gl=angle", "--use-angle=" + p.GraphicsBackend, "--enable-zero-copy"}
 	case "opengl":
-		return append([]string{"--use-gl=angle", "--use-angle=gl"}, hardwareAccelerationFlags...)
+		return []string{"--use-gl=angle", "--use-angle=gl", "--enable-zero-copy"}
 	case "software":
 		return []string{"--use-gl=angle", "--use-angle=swiftshader"}
 	}

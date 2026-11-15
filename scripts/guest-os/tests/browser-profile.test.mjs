@@ -16,15 +16,14 @@ test("creation preferences accept only bounded typed fields", () => {
 });
 test("real graphics APIs are selected only for compatible guest platforms", () => {
   const native = { ...options, webgl: "native", canvas: "native" };
-  const acceleration = ["--enable-gpu-rasterization", "--enable-zero-copy"];
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "metal" }, "darwin"),
-    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=metal", ...acceleration]);
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=metal", "--enable-zero-copy"]);
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "d3d11" }, "win32"),
-    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=d3d11", ...acceleration]);
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=d3d11", "--enable-zero-copy"]);
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "vulkan" }, "linux"),
-    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=vulkan", ...acceleration]);
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=vulkan", "--enable-zero-copy"]);
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "opengl" }, "linux"),
-    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=gl", ...acceleration]);
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=gl", "--enable-zero-copy"]);
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "software" }, "linux"),
     ["--window-size=1280,800", "--use-gl=angle", "--use-angle=swiftshader"]);
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "auto" }, "linux"),
@@ -57,7 +56,7 @@ test("Windows saves creation choices before browser startup and reuses them on r
   } finally { await service.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("browser startup uses the persisted graphics backend without obsolete Canvas switches", async t => {
+test("browser startup uses the persisted backend and respects Chromium rasterization policy", async t => {
   const { createWindowsBrowserService } = await import("../windows-browser.mjs");
   const hardware = { darwin: "metal", win32: "d3d11", linux: "vulkan" }[process.platform];
   for (const backend of [hardware, "software", "auto"]) {
@@ -77,9 +76,8 @@ test("browser startup uses the persisted graphics backend without obsolete Canva
         service = create();
         await service.request({ operation: "configure", input: { proxy: "http://127.0.0.1:18501" } });
         await assert.rejects(service.request({ method: "GET", path: "/tabs", input: {} }), { code: "launch_captured" });
-        const accelerated = backend === hardware;
-        for (const flag of ["--enable-gpu-rasterization", "--enable-zero-copy"])
-          assert.equal(launched.args.includes(flag), accelerated);
+        assert.equal(launched.args.includes("--enable-zero-copy"), backend === hardware);
+        assert.ok(!launched.args.includes("--enable-gpu-rasterization"));
         assert.ok(!launched.args.includes("--enable-accelerated-2d-canvas"));
         assert.ok(!launched.args.includes("--ignore-gpu-blocklist"));
         assert.equal(launched.chromiumSandbox, true);

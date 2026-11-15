@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-func TestHardwareBackendsRequestGPUAcceleration(t *testing.T) {
-	acceleration := []string{"--enable-gpu-rasterization", "--enable-zero-copy"}
+func TestHardwareBackendsSelectANGLEAndZeroCopy(t *testing.T) {
 	for _, tc := range []struct {
 		backend string
 		angle   string
@@ -17,7 +16,7 @@ func TestHardwareBackendsRequestGPUAcceleration(t *testing.T) {
 		{"opengl", "gl"},
 	} {
 		got := (&Profile{Options: Options{GraphicsBackend: tc.backend}}).GraphicsFlags()
-		want := append([]string{"--use-gl=angle", "--use-angle=" + tc.angle}, acceleration...)
+		want := []string{"--use-gl=angle", "--use-angle=" + tc.angle, "--enable-zero-copy"}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s flags = %v, want %v", tc.backend, got, want)
 		}
@@ -34,10 +33,5 @@ func TestAutomaticAndSoftwareGraphicsDoNotForceGPUFlags(t *testing.T) {
 	want := []string{"--use-gl=angle", "--use-angle=swiftshader"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("software flags = %v, want %v", got, want)
-	}
-	for _, flag := range got {
-		if flag == "--enable-gpu-rasterization" || flag == "--enable-zero-copy" || flag == "--enable-accelerated-2d-canvas" {
-			t.Fatalf("software backend received hardware flag %s", flag)
-		}
 	}
 }

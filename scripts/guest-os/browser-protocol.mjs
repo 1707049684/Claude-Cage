@@ -23,7 +23,7 @@ export function browserProfileFlags(input, platform = process.platform) {
     ...(["metal","d3d11","vulkan"].includes(backend) ? ["--use-gl=angle",`--use-angle=${backend}`] : []),
     ...(backend==="opengl" ? ["--use-gl=angle","--use-angle=gl"]:[]),
     ...(backend==="software" ? ["--use-gl=angle","--use-angle=swiftshader"]:[]),
-    ...(hardware ? ["--enable-gpu-rasterization", "--enable-zero-copy"] : []),
+    ...(hardware ? ["--enable-zero-copy"] : []),
     ...(value.webgl === "disabled" ? ["--disable-3d-apis", "--disable-webgl"] : []),
     ...(value.canvas === "blocked" ? ["--disable-reading-from-canvas"] : [])];
 }
