@@ -61,11 +61,11 @@ func MacOSSSHArgs(profile, user string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(append([]string{}, base...), "-o", "ClearAllForwardings=yes"), nil
+	return append(base, "-o", "ClearAllForwardings=yes"), nil
 }
 
 // MacOSScreenSharingSSHArgs builds a loopback-only local forward to the guest
-// Screen Sharing port. The host port must already be reserved. Do not reuse
+// Screen Sharing port. Do not reuse
 // MacOSSSHArgs: that set clears all forwards.
 func MacOSScreenSharingSSHArgs(profile, user string, hostPort int) ([]string, error) {
 	if hostPort < 1 || hostPort > 65535 {
@@ -75,9 +75,10 @@ func MacOSScreenSharingSSHArgs(profile, user string, hostPort int) ([]string, er
 	if err != nil {
 		return nil, err
 	}
-	return append(append([]string{}, base...),
+	return append(base,
 		"-N",
 		"-o", "ExitOnForwardFailure=yes",
+		"-o", "PermitLocalCommand=yes", "-o", "LocalCommand=echo 1",
 		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:5900", hostPort)), nil
 }
 

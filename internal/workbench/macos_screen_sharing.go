@@ -36,17 +36,14 @@ var (
 // macOSScreenSharing is the cage-serve-owned SSH local forward to guest 5900.
 // Hooks are for tests; nil uses production gate, ssh, inspect and open(1) behavior.
 type macOSScreenSharing struct {
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	cancel   context.CancelFunc
-	port     int
-	gate     func(context.Context) (cage.GateStatus, error)
-	open     func(string) error
-	startSSH func(context.Context, []string) *exec.Cmd
-	probe    func(context.Context, string) error
-	inspect  func(context.Context) (macOSScreenSharingStatus, error)
-	enable   func(context.Context) error
-	proxy    func(context.Context) (io.ReadWriteCloser, error)
+	mu      sync.Mutex
+	done    <-chan struct{}
+	cancel  context.CancelFunc
+	port    int
+	gate    func(context.Context) (cage.GateStatus, error)
+	open    func(string) error
+	inspect func(context.Context) (macOSScreenSharingStatus, error)
+	enable  func(context.Context) error
 }
 
 type macOSScreenSharingRequest struct {
@@ -84,7 +81,7 @@ func screenSharingIsolationError(state cage.GateStatus, err error) error {
 }
 
 func (s *Server) requireMacOSNetworkIsolated(ctx context.Context) error {
-	if s.screenSharing != nil && s.screenSharing.gate != nil {
+	if s.screenSharing.gate != nil {
 		state, err := s.screenSharing.gate(ctx)
 		return screenSharingIsolationError(state, err)
 	}
@@ -100,6 +97,10 @@ func (s *Server) requireMacOSNetworkIsolated(ctx context.Context) error {
 }
 
 func (s *Server) openMacOSScreenSharing(w http.ResponseWriter, r *http.Request) {
+	if !s.hasTrustedView(r) {
+		http.Error(w, errScreenSharingNeedMacHost.Error(), http.StatusForbidden)
+		return
+	}
 	if s.macosGuest == nil {
 		requestError(w, errScreenSharingNotMacOS)
 		return
@@ -127,11 +128,7 @@ func (s *Server) openMacOSScreenSharing(w http.ResponseWriter, r *http.Request) 
 		}
 		jsonReply(w, status)
 	case "enable":
-		if err := s.requireMacOSNetworkIsolated(r.Context()); err != nil {
-			requestError(w, err)
-			return
-		}
-		if err := s.enableMacOSScreenSharingService(r.Context()); err != nil {
+		if err := s.enableIsolatedMacOSScreenSharing(r.Context()); err != nil {
 			requestError(w, err)
 			return
 		}
@@ -164,7 +161,7 @@ func (s *Server) openMacOSScreenSharing(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) openMacOSScreenSharingURL(url string) error {
-	if s.screenSharing != nil && s.screenSharing.open != nil {
+	if s.screenSharing.open != nil {
 		return s.screenSharing.open(url)
 	}
 	if runtime.GOOS != "darwin" {
@@ -178,8 +175,15 @@ func (s *Server) openMacOSScreenSharingURL(url string) error {
 	return nil
 }
 
-func (s *Server) enableMacOSScreenSharingService(ctx context.Context) error {
-	if s.screenSharing != nil && s.screenSharing.enable != nil {
+func (s *Server) enableIsolatedMacOSScreenSharing(ctx context.Context) error {
+	// BeginCheck and Grant take this same lock. Keep the service change
+	// inside the verified closed-gate interval.
+	s.safetyOp.Lock()
+	defer s.safetyOp.Unlock()
+	if err := s.requireMacOSNetworkIsolated(ctx); err != nil {
+		return err
+	}
+	if s.screenSharing.enable != nil {
 		return s.screenSharing.enable(ctx)
 	}
 	if s.macosGuest == nil {
@@ -188,9 +192,6 @@ func (s *Server) enableMacOSScreenSharingService(ctx context.Context) error {
 	provision, err := guestos.MacOSProvisionUser(s.profile)
 	if err != nil {
 		return err
-	}
-	if provision != "cageprovision" {
-		return errors.New("客机置备身份不匹配")
 	}
 	args, err := guestos.MacOSSSHArgs(s.profile, provision)
 	if err != nil {
@@ -208,28 +209,20 @@ func (s *Server) enableMacOSScreenSharingService(ctx context.Context) error {
 	return nil
 }
 
-func setupSharingSatisfied(status macOSScreenSharingStatus, opened, confirmed bool) bool {
-	if !status.Usable {
-		return false
-	}
-	if status.Authorized == cage.CheckPassed {
-		return true
-	}
-	return opened || confirmed
+func setupSharingSatisfied(status macOSScreenSharingStatus, confirmed bool) bool {
+	return status.Usable && (status.Authorized == cage.CheckPassed || confirmed)
 }
 
 func (s *Server) evaluateMacOSSetupSharing(ctx context.Context, force bool) macOSScreenSharingStatus {
 	s.mu.Lock()
-	due := force || time.Since(s.macSetupSharingAttempt) > 15*time.Second
-	cached := s.macSetupSharingStatus
-	opened, confirmed := s.macSetupSharingOpened, s.macSetupSharingConfirmed
-	s.mu.Unlock()
-	if !due && cached.State != "" {
-		cached.Satisfied = setupSharingSatisfied(cached, opened, confirmed)
+	if !force && time.Since(s.macSetupSharingAttempt) < 15*time.Second && s.macSetupSharingStatus.State != "" {
+		cached := s.macSetupSharingStatus
+		cached.Satisfied = setupSharingSatisfied(cached, s.macSetupSharingConfirmed)
+		s.mu.Unlock()
 		return cached
 	}
-	s.mu.Lock()
-	s.macSetupSharingAttempt = time.Now()
+	attempt := time.Now()
+	s.macSetupSharingAttempt = attempt
 	s.mu.Unlock()
 	status, err := s.inspectMacOSScreenSharing(ctx)
 	if err != nil {
@@ -246,9 +239,10 @@ func (s *Server) evaluateMacOSSetupSharing(ctx context.Context, force bool) macO
 		}
 	}
 	s.mu.Lock()
-	opened, confirmed = s.macSetupSharingOpened, s.macSetupSharingConfirmed
-	status.Satisfied = setupSharingSatisfied(status, opened, confirmed)
-	s.macSetupSharingStatus = status
+	status.Satisfied = setupSharingSatisfied(status, s.macSetupSharingConfirmed)
+	if s.macSetupSharingAttempt == attempt {
+		s.macSetupSharingStatus = status
+	}
 	s.mu.Unlock()
 	return status
 }
@@ -257,7 +251,7 @@ func (s *Server) inspectMacOSScreenSharing(ctx context.Context) (macOSScreenShar
 	if s.macosGuest == nil {
 		return macOSScreenSharingStatus{}, errScreenSharingNotMacOS
 	}
-	if s.screenSharing != nil && s.screenSharing.inspect != nil {
+	if s.screenSharing.inspect != nil {
 		return s.screenSharing.inspect(ctx)
 	}
 	service, portOpen, serviceErr := s.inspectMacOSScreenSharingService(ctx)
@@ -336,7 +330,7 @@ func assembleScreenSharingStatus(serviceLoaded, portOpen bool, serviceErr error,
 			evidence += "。"
 		}
 		handshake.Evidence = evidence
-		usable = portOpen || serviceLoaded || rfb.Handshake
+		usable = true
 		if rfb.Reason == "" && rfb.Types > 0 {
 			authorization.State = cage.CheckUnknown
 			authorization.Evidence = "RFB 握手已成功，但系统完整性保护下无法直接读取「屏幕共享」开关。若本机客户端仍提示「屏幕共享在 localhost 上不被允许」，请在客机系统设置中再手动打开一次。"
@@ -373,10 +367,6 @@ func (s *Server) inspectMacOSScreenSharingService(ctx context.Context) (bool, bo
 	if s.macosGuest == nil {
 		return false, false, errScreenSharingNotMacOS
 	}
-	args, err := guestos.MacOSSSHArgs(s.profile, s.macosGuest.User)
-	if err != nil {
-		return false, false, err
-	}
 	script := `service=no
 if launchctl print system/com.apple.screensharing >/dev/null 2>&1 || launchctl list com.apple.screensharing >/dev/null 2>&1; then
 	service=yes
@@ -388,9 +378,7 @@ fi
 printf 'service=%s port=%s\n' "$service" "$port"`
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, sshExecutable(), append(append([]string{}, args...), "-T", "cage-macos", "--", "exec /bin/sh -c "+shellescape.Quote(script))...)
-	cmd.Env = sshEnvironment()
-	host.HideCommandWindow(cmd)
+	cmd := s.macOSSSHCommand(ctx, "-T", "cage-macos", "--", "exec /bin/sh -c "+shellescape.Quote(script))
 	out, err := cmd.Output()
 	line := strings.TrimSpace(string(out))
 	service := strings.Contains(line, "service=yes")
@@ -402,90 +390,44 @@ printf 'service=%s port=%s\n' "$service" "$port"`
 }
 
 func (s *Server) inspectMacOSScreenSharingRFB(ctx context.Context) (screenSharingRFBResult, error) {
-	if s.screenSharing != nil && s.screenSharing.port > 0 && screenSharingProcessAlive(s.screenSharing.cmd) {
-		return probeScreenSharingRFBDetailed(ctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(s.screenSharing.port)))
-	}
-	conn, err := s.proxyMacOSScreenSharing(ctx)
-	if err != nil {
-		return screenSharingRFBResult{Unreachable: true}, err
-	}
-	defer conn.Close()
-	return readScreenSharingRFB(ctx, conn)
-}
-
-func (s *Server) proxyMacOSScreenSharing(ctx context.Context) (io.ReadWriteCloser, error) {
-	if s.screenSharing != nil && s.screenSharing.proxy != nil {
-		return s.screenSharing.proxy(ctx)
-	}
-	if s.macosGuest == nil {
-		return nil, errScreenSharingNotMacOS
-	}
-	args, err := guestos.MacOSSSHArgs(s.profile, s.macosGuest.User)
-	if err != nil {
-		return nil, err
-	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	cmd := exec.CommandContext(ctx, sshExecutable(), append(append([]string{}, args...), "-W", "127.0.0.1:5900", "cage-macos")...)
-	cmd.Env = sshEnvironment()
-	host.HideCommandWindow(cmd)
+	defer cancel()
+	cmd := s.macOSSSHCommand(ctx, "-W", "127.0.0.1:5900", "cage-macos")
+	if cmd.Err != nil {
+		return screenSharingRFBResult{Unreachable: true}, cmd.Err
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		cancel()
-		return nil, err
+		return screenSharingRFBResult{}, err
 	}
+	defer stdin.Close()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		cancel()
-		return nil, err
+		return screenSharingRFBResult{}, err
 	}
+	defer stdout.Close()
 	if err := cmd.Start(); err != nil {
-		cancel()
-		return nil, err
+		return screenSharingRFBResult{Unreachable: true}, err
 	}
-	return &screenSharingSSHProxy{cmd: cmd, cancel: cancel, stdin: stdin, stdout: stdout}, nil
-}
-
-type screenSharingSSHProxy struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-}
-
-func (p *screenSharingSSHProxy) Read(b []byte) (int, error)  { return p.stdout.Read(b) }
-func (p *screenSharingSSHProxy) Write(b []byte) (int, error) { return p.stdin.Write(b) }
-func (p *screenSharingSSHProxy) Close() error {
-	_ = p.stdin.Close()
-	_ = p.stdout.Close()
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-		_ = p.cmd.Wait()
-	}
-	return nil
+	defer func() { cancel(); _ = cmd.Wait() }()
+	return readScreenSharingRFB(ctx, struct {
+		io.Reader
+		io.Writer
+	}{stdout, stdin})
 }
 
 func probeScreenSharingRFB(ctx context.Context, addr string) error {
-	result, err := probeScreenSharingRFBDetailed(ctx, addr)
-	if err != nil {
-		return err
-	}
-	if result.Denied || !result.Handshake {
-		return errScreenSharingUnreachable
-	}
-	return nil
-}
-
-func probeScreenSharingRFBDetailed(ctx context.Context, addr string) (screenSharingRFBResult, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return screenSharingRFBResult{Unreachable: true}, errScreenSharingUnreachable
+		return errScreenSharingUnreachable
 	}
 	defer conn.Close()
-	return readScreenSharingRFB(ctx, conn)
+	result, err := readScreenSharingRFB(ctx, conn)
+	if err != nil || result.Denied || !result.Handshake {
+		return errScreenSharingUnreachable
+	}
+	return nil
 }
 
 func readScreenSharingRFB(ctx context.Context, conn io.ReadWriter) (screenSharingRFBResult, error) {
@@ -502,18 +444,40 @@ func readScreenSharingRFB(ctx context.Context, conn io.ReadWriter) (screenSharin
 		return result, errScreenSharingUnreachable
 	}
 	result.Greeting = strings.TrimRight(string(buf[:]), "\n")
-	if _, err := conn.Write(buf[:]); err != nil {
+	version := string(buf[:])
+	switch version {
+	case "RFB 003.003\n", "RFB 003.007\n", "RFB 003.008\n":
+	case "RFB 003.889\n": // Apple Remote Desktop also supports RFB 3.8.
+		version = "RFB 003.008\n"
+	default:
+		return result, errScreenSharingUnreachable
+	}
+	if _, err := io.WriteString(conn, version); err != nil {
 		return result, errScreenSharingUnreachable
 	}
 	reader := bufio.NewReader(conn)
-	first, err := reader.ReadByte()
-	if err != nil {
-		result.Handshake = true
-		result.Denied = true
-		result.Reason = "版本交换后连接已关闭，可能尚未在系统设置中授权"
-		return result, nil
+	var count byte
+	if version == "RFB 003.003\n" {
+		var securityType uint32
+		if err := binary.Read(reader, binary.BigEndian, &securityType); err != nil {
+			return result, errScreenSharingUnreachable
+		}
+		if securityType != 0 {
+			result.Handshake = true
+			result.Types = 1
+			return result, nil
+		}
+	} else {
+		var err error
+		count, err = reader.ReadByte()
+		if err != nil {
+			result.Handshake = true
+			result.Denied = true
+			result.Reason = "版本交换后连接已关闭，可能尚未在系统设置中授权"
+			return result, nil
+		}
 	}
-	if first == 0 {
+	if count == 0 {
 		var length uint32
 		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
 			result.Handshake = true
@@ -532,52 +496,33 @@ func readScreenSharingRFB(ctx context.Context, conn io.ReadWriter) (screenSharin
 		result.Denied = true
 		return result, nil
 	}
-	types := make([]byte, int(first))
-	if _, err := io.ReadFull(reader, types); err != nil {
-		// Some servers send a 3.3 4-byte security type. first was the first byte
-		// of a big-endian uint32. If the remaining 3 bytes plus first equal 0,
-		// it is a refusal.
-		rest := make([]byte, 3)
-		n, readErr := io.ReadFull(reader, rest)
-		if readErr == nil && n == 3 && first == 0 && rest[0] == 0 && rest[1] == 0 && rest[2] == 0 {
-			result.Handshake = true
-			result.Denied = true
-			result.Reason = "服务器拒绝连接"
-			return result, nil
-		}
-		if int(first) > 0 {
-			result.Handshake = true
-			result.Types = 1
-			return result, nil
-		}
+	if _, err := io.CopyN(io.Discard, reader, int64(count)); err != nil {
 		return result, errScreenSharingUnreachable
 	}
 	result.Handshake = true
-	result.Types = int(first)
+	result.Types = int(count)
 	return result, nil
 }
 
-func screenSharingAuthorizationDenied(reason string) bool {
-	lower := strings.ToLower(reason)
-	return strings.Contains(reason, "不被允许") || strings.Contains(reason, "不允许") ||
-		strings.Contains(lower, "not allowed") || strings.Contains(lower, "not permitted") ||
-		strings.Contains(lower, "denied")
-}
-
 func (s *Server) ensureMacOSScreenSharingTunnel(ctx context.Context) (int, error) {
-	if s.screenSharing == nil {
-		s.screenSharing = &macOSScreenSharing{}
-	}
-	life := s.lifetimeContext()
-	session := s.screenSharing
+	session := &s.screenSharing
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	if session.port > 0 && screenSharingProcessAlive(session.cmd) {
-		if err := s.probeMacOSScreenSharing(ctx, session.port); err == nil {
+	s.mu.Lock()
+	ready := s.ready && !s.closing
+	life := s.lifetimeContextLocked()
+	s.mu.Unlock()
+	if !ready {
+		return 0, errScreenSharingNotReady
+	}
+	deadline, cancelWait := context.WithTimeout(ctx, 8*time.Second)
+	defer cancelWait()
+	if session.aliveLocked() {
+		if err := probeScreenSharingRFB(deadline, net.JoinHostPort("127.0.0.1", strconv.Itoa(session.port))); err == nil && session.aliveLocked() {
 			return session.port, nil
 		}
-		session.stopLocked()
 	}
+	session.stopLocked()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, errors.New("无法在本机环回地址上分配屏幕共享端口")
@@ -592,65 +537,60 @@ func (s *Server) ensureMacOSScreenSharingTunnel(ctx context.Context) (int, error
 	}
 	args = append(args, "cage-macos")
 	cmdCtx, cancel := context.WithCancel(life)
-	cmd := s.screenSharingSSHCommand(cmdCtx, args)
+	cmd := exec.CommandContext(cmdCtx, sshExecutable(), args...)
+	cmd.Env = sshEnvironment()
+	host.HideCommandWindow(cmd)
 	if cmd.Err != nil {
 		cancel()
 		return 0, errors.New("无法准备客机 SSH 转发")
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return 0, err
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return 0, errors.New("无法启动客机 SSH 转发")
 	}
-	go func() { _ = cmd.Wait() }()
-	session.cmd = cmd
-	session.cancel = cancel
-	session.port = port
-	deadline, cancelWait := context.WithTimeout(ctx, 8*time.Second)
-	defer cancelWait()
-	for {
-		if !screenSharingProcessAlive(cmd) {
-			session.stopLocked()
-			return 0, errScreenSharingUnreachable
-		}
-		if err := s.probeMacOSScreenSharing(deadline, port); err == nil {
+	// OpenSSH emits the marker from its fixed LocalCommand only after it
+	// authenticates the guest and binds the requested port. A different
+	// listener can otherwise win the port allocation race and imitate RFB.
+	bound := make(chan bool, 1)
+	done := make(chan struct{})
+	go func() {
+		var marker [1]byte
+		_, err := io.ReadFull(stdout, marker[:])
+		bound <- err == nil && marker[0] == '1'
+		_ = cmd.Wait()
+		close(done)
+	}()
+	session.cancel, session.done, session.port = cancel, done, port
+	select {
+	case ok := <-bound:
+		if ok && probeScreenSharingRFB(deadline, net.JoinHostPort("127.0.0.1", strconv.Itoa(port))) == nil && session.aliveLocked() {
 			return port, nil
 		}
-		select {
-		case <-deadline.Done():
-			session.stopLocked()
-			return 0, errScreenSharingUnreachable
-		case <-time.After(150 * time.Millisecond):
-		}
+	case <-deadline.Done():
+	case <-life.Done():
 	}
+	session.stopLocked()
+	return 0, errScreenSharingUnreachable
 }
 
-func (s *Server) screenSharingSSHCommand(ctx context.Context, args []string) *exec.Cmd {
-	if s.screenSharing != nil && s.screenSharing.startSSH != nil {
-		return s.screenSharing.startSSH(ctx, args)
+func (ss *macOSScreenSharing) aliveLocked() bool {
+	if ss.done == nil {
+		return false
 	}
-	cmd := exec.CommandContext(ctx, sshExecutable(), args...)
-	cmd.Env = sshEnvironment()
-	host.HideCommandWindow(cmd)
-	return cmd
-}
-
-func (s *Server) probeMacOSScreenSharing(ctx context.Context, port int) error {
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	if s.screenSharing != nil && s.screenSharing.probe != nil {
-		return s.screenSharing.probe(ctx, addr)
+	select {
+	case <-ss.done:
+		return false
+	default:
+		return true
 	}
-	return probeScreenSharingRFB(ctx, addr)
-}
-
-func screenSharingProcessAlive(cmd *exec.Cmd) bool {
-	// Wait sets ProcessState for both a normal exit and a signal (Kill).
-	return cmd != nil && cmd.Process != nil && cmd.ProcessState == nil
 }
 
 func (s *Server) closeMacOSScreenSharing() {
-	if s.screenSharing == nil {
-		return
-	}
 	s.screenSharing.mu.Lock()
 	defer s.screenSharing.mu.Unlock()
 	s.screenSharing.stopLocked()
@@ -659,11 +599,9 @@ func (s *Server) closeMacOSScreenSharing() {
 func (ss *macOSScreenSharing) stopLocked() {
 	if ss.cancel != nil {
 		ss.cancel()
+		<-ss.done
 		ss.cancel = nil
+		ss.done = nil
+		ss.port = 0
 	}
-	if ss.cmd != nil && ss.cmd.Process != nil {
-		_ = ss.cmd.Process.Kill()
-	}
-	ss.cmd = nil
-	ss.port = 0
 }

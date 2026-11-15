@@ -1,20 +1,30 @@
 #!/bin/bash
 # Enable the macOS Screen Sharing service for the ordinary Cage guest account.
-# Idempotent. Must run as root inside a VirtualMac guest.
+# Runs as root inside a verified macOS guest.
 # Intended for first install (provision-macos-workbench.sh) while the guest is
 # still isolated. Later repair must be started from the host only after the
 # egress gate is closed; this script cannot see the host gate.
 # Does not use ARD kickstart and does not set a VNC legacy password.
 set -euo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-[[ $# == 1 && $EUID == 0 && $(uname -sm) == 'Darwin arm64' && $(sysctl -n hw.model) =~ ^VirtualMac[0-9]+,[0-9]+$ ]]
+[[ $# == 1 && $EUID == 0 && $(uname -s) == Darwin ]] || exit 1
+[[ $(sysctl -n hw.model) =~ ^VirtualMac[0-9]+,[0-9]+$ ]] || /usr/local/libexec/cage-guest-check --check
 user=$1
-[[ $user =~ ^[a-z][a-z0-9_]{0,30}$ && $user != root && $user != cageprovision && $user != cagesetup ]]
-id "$user" >/dev/null
-[[ -f /var/db/cage-guest-os && ! -L /var/db/cage-guest-os && $(stat -f %u /var/db/cage-guest-os) == 0 && $(cat /var/db/cage-guest-os) == macos ]]
+[[ $user =~ ^[a-z][a-z0-9_]{0,30}$ && $user != root && $user != cageprovision && $user != cagesetup ]] || exit 1
+[[ $(id -u "$user") -ge 500 && " $(id -Gn "$user") " != *' admin '* ]] || exit 1
+[[ -f /var/db/cage-guest-os && ! -L /var/db/cage-guest-os && $(stat -f %u /var/db/cage-guest-os) == 0 && $(cat /var/db/cage-guest-os) == macos ]] || exit 1
 
 plist=/System/Library/LaunchDaemons/com.apple.screensharing.plist
-[[ -f $plist ]]
+[[ -f $plist ]] || exit 1
+group=com.apple.access_screensharing
+if ! dscl . -read "/Groups/$group" >/dev/null 2>&1; then
+    dseditgroup -o create -q "$group"
+fi
+if ! dseditgroup -o checkmember -m "$user" "$group" >/dev/null 2>&1; then
+    dseditgroup -o edit -a "$user" -t user "$group"
+fi
+dseditgroup -o checkmember -m "$user" "$group" >/dev/null
+
 label=system/com.apple.screensharing
 launchctl enable "$label"
 if ! launchctl print "$label" >/dev/null 2>&1; then
@@ -26,15 +36,6 @@ if ! launchctl print "$label" >/dev/null 2>&1; then
     echo '无法加载 com.apple.screensharing 服务。' >&2
     exit 1
 fi
-
-group=com.apple.access_screensharing
-if ! dscl . -read "/Groups/$group" >/dev/null 2>&1; then
-    dseditgroup -o create -q "$group"
-fi
-if ! dseditgroup -o checkmember -m "$user" "$group" >/dev/null 2>&1; then
-    dseditgroup -o edit -a "$user" -t user "$group"
-fi
-dseditgroup -o checkmember -m "$user" "$group" >/dev/null
 
 # Prefer a TCP probe: lsof can miss launchd sockets without extra rights,
 # and macfuse project mounts can make lsof exit 1 even when 5900 is open.

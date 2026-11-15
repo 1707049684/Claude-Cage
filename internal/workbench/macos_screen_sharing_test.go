@@ -1,24 +1,31 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestScreenSharingIsolationError(t *testing.T) {
@@ -37,18 +44,18 @@ func TestScreenSharingIsolationError(t *testing.T) {
 
 func TestSetupSharingSatisfied(t *testing.T) {
 	usable := macOSScreenSharingStatus{Usable: true, Authorized: cage.CheckUnknown}
-	if setupSharingSatisfied(usable, false, false) {
+	if setupSharingSatisfied(usable, false) {
 		t.Fatal("usable but unverified authorization should still need the settings toggle")
 	}
-	if !setupSharingSatisfied(usable, true, false) || !setupSharingSatisfied(usable, false, true) {
-		t.Fatal("opening or confirming the settings pane should complete first setup")
+	if !setupSharingSatisfied(usable, true) {
+		t.Fatal("confirming the settings toggle should complete first setup")
 	}
 	authorized := macOSScreenSharingStatus{Usable: true, Authorized: cage.CheckPassed}
-	if !setupSharingSatisfied(authorized, false, false) {
+	if !setupSharingSatisfied(authorized, false) {
 		t.Fatal("an authorized usable session should pass without a repeated toggle")
 	}
 	denied := macOSScreenSharingStatus{Usable: false, Authorized: cage.CheckFailed}
-	if setupSharingSatisfied(denied, true, true) {
+	if setupSharingSatisfied(denied, true) {
 		t.Fatal("a denied handshake must not be treated as complete")
 	}
 }
@@ -105,6 +112,30 @@ func TestReadScreenSharingRFB(t *testing.T) {
 			t.Fatalf("types: %+v err=%v", result, err)
 		}
 	})
+	t.Run("security type list must be complete", func(t *testing.T) {
+		wire := struct {
+			io.Reader
+			io.Writer
+		}{
+			bytes.NewReader(append([]byte("RFB 003.008\n"), 2, 30)), io.Discard,
+		}
+		result, err := readScreenSharingRFB(t.Context(), wire)
+		if err == nil || result.Handshake {
+			t.Fatalf("truncated type list accepted: %+v, %v", result, err)
+		}
+	})
+	t.Run("RFB 3.3 single security type", func(t *testing.T) {
+		wire := struct {
+			io.Reader
+			io.Writer
+		}{
+			bytes.NewReader(append([]byte("RFB 003.003\n"), 0, 0, 0, 30)), io.Discard,
+		}
+		result, err := readScreenSharingRFB(t.Context(), wire)
+		if err != nil || !result.Handshake || result.Denied || result.Types != 1 {
+			t.Fatalf("3.3 security type: %+v, %v", result, err)
+		}
+	})
 	t.Run("not allowed reason", func(t *testing.T) {
 		reason := "屏幕共享在 localhost 上不被允许"
 		client, server := net.Pipe()
@@ -123,9 +154,6 @@ func TestReadScreenSharingRFB(t *testing.T) {
 		result, err := readScreenSharingRFB(ctx, client)
 		if err != nil || !result.Handshake || !result.Denied || result.Reason != reason {
 			t.Fatalf("denied: %+v err=%v", result, err)
-		}
-		if !screenSharingAuthorizationDenied(result.Reason) {
-			t.Fatal("chinese localhost refusal was not recognized")
 		}
 	})
 	t.Run("hang up after version", func(t *testing.T) {
@@ -148,7 +176,6 @@ func TestReadScreenSharingRFB(t *testing.T) {
 
 func TestOpenMacOSScreenSharingActions(t *testing.T) {
 	s := testServer(t)
-	writeScreenSharingSSHConfig(t, s, 55413)
 
 	if w := screenSharingRequest(s, true, "{}"); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errScreenSharingNotMacOS.Error()) {
 		t.Fatalf("without a macOS guest: %d %s", w.Code, w.Body.String())
@@ -161,7 +188,7 @@ func TestOpenMacOSScreenSharingActions(t *testing.T) {
 
 	s.ready = true
 	var enabled int
-	s.screenSharing = &macOSScreenSharing{
+	s.screenSharing = macOSScreenSharing{
 		gate: func(context.Context) (cage.GateStatus, error) {
 			return cage.GateStatus{Mode: cage.GateOpen}, nil
 		},
@@ -171,10 +198,6 @@ func TestOpenMacOSScreenSharingActions(t *testing.T) {
 		},
 		inspect: func(context.Context) (macOSScreenSharingStatus, error) {
 			return assembleScreenSharingStatus(true, true, nil, screenSharingRFBResult{Greeting: "RFB 003.008", Handshake: true, Types: 1}, nil), nil
-		},
-		open: func(string) error { return nil },
-		startSSH: func(ctx context.Context, args []string) *exec.Cmd {
-			return startRFBStub(t, ctx, forwardPort(t, args))
 		},
 	}
 
@@ -203,12 +226,9 @@ func TestOpenMacOSScreenSharingActions(t *testing.T) {
 		t.Fatalf("untrusted view: %d %s", w.Code, w.Body.String())
 	}
 
-	// Daily connect and status checks do not require the gate to be closed.
+	// Status checks also work while the gate is open.
 	s.screenSharing.gate = func(context.Context) (cage.GateStatus, error) {
 		return cage.GateStatus{Mode: cage.GateOpen}, nil
-	}
-	if w := screenSharingRequest(s, true, `{"action":"open"}`); w.Code != http.StatusOK {
-		t.Fatalf("daily open with gate open: %d %s", w.Code, w.Body.String())
 	}
 	if w := screenSharingRequest(s, true, `{"action":"check"}`); w.Code != http.StatusOK {
 		t.Fatalf("status check with gate open: %d %s", w.Code, w.Body.String())
@@ -236,29 +256,18 @@ func TestOpenMacOSScreenSharingActions(t *testing.T) {
 
 func TestOpenMacOSScreenSharingTunnel(t *testing.T) {
 	s := testServer(t)
-	writeScreenSharingSSHConfig(t, s, 58716)
+	connections, shutdown := startScreenSharingGuest(t, s)
 	s.macosGuest = &guestos.MacOSProfile{Instance: "mac", User: "blue"}
 	s.ready = true
 	var opened []string
-	var sshStarts int
-	s.screenSharing = &macOSScreenSharing{
+
+	s.screenSharing = macOSScreenSharing{
 		gate: func(context.Context) (cage.GateStatus, error) {
 			return cage.GateStatus{Mode: cage.GateClosed}, nil
 		},
 		open: func(url string) error {
 			opened = append(opened, url)
 			return nil
-		},
-		startSSH: func(ctx context.Context, args []string) *exec.Cmd {
-			sshStarts++
-			if !containsArg(args, "58716") || !containsArg(args, "blue") || !containsArg(args, "cage-macos") {
-				t.Errorf("unexpected ssh args: %q", args)
-			}
-			if containsArg(args, "ClearAllForwardings=yes") {
-				t.Error("forward command cleared local forwards")
-			}
-			port := forwardPort(t, args)
-			return startRFBStub(t, ctx, port)
 		},
 	}
 
@@ -281,8 +290,8 @@ func TestOpenMacOSScreenSharingTunnel(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("reuse: %d %s", w.Code, w.Body.String())
 	}
-	if sshStarts != 1 {
-		t.Fatalf("tunnel was recreated: starts=%d", sshStarts)
+	if connections.Load() != 1 {
+		t.Fatalf("tunnel was recreated: starts=%d", connections.Load())
 	}
 	if len(opened) != 2 {
 		t.Fatalf("reuse should reopen the client: %q", opened)
@@ -290,7 +299,7 @@ func TestOpenMacOSScreenSharingTunnel(t *testing.T) {
 
 	s.publishGate(cage.GateStatus{Mode: cage.GateOpen, RunID: "run", Epoch: 1})
 	s.screenSharing.mu.Lock()
-	alive := screenSharingProcessAlive(s.screenSharing.cmd)
+	alive := s.screenSharing.aliveLocked()
 	port := s.screenSharing.port
 	s.screenSharing.mu.Unlock()
 	if !alive || port == 0 {
@@ -304,14 +313,12 @@ func TestOpenMacOSScreenSharingTunnel(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("open after grant: %d %s", w.Code, w.Body.String())
 	}
-	if sshStarts != 1 {
-		t.Fatalf("grant recreated the tunnel: starts=%d", sshStarts)
+	if connections.Load() != 1 {
+		t.Fatalf("grant recreated the tunnel: starts=%d", connections.Load())
 	}
 
 	s.closeMacOSScreenSharing()
-	s.screenSharing.startSSH = func(ctx context.Context, args []string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "30")
-	}
+	shutdown()
 	w = screenSharingRequest(s, true, `{"action":"open"}`)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errScreenSharingUnreachable.Error()) {
 		t.Fatalf("unreachable guest: %d %s", w.Code, w.Body.String())
@@ -322,7 +329,7 @@ func TestMacOSSharingMaintenanceRequiresIsolation(t *testing.T) {
 	s := testServer(t)
 	s.macosGuest = &guestos.MacOSProfile{Instance: "mac", User: "blue"}
 	s.ready = true
-	s.screenSharing = &macOSScreenSharing{gate: func(context.Context) (cage.GateStatus, error) {
+	s.screenSharing = macOSScreenSharing{gate: func(context.Context) (cage.GateStatus, error) {
 		return cage.GateStatus{Mode: cage.GateOpen}, nil
 	}}
 	r := httptest.NewRequest(http.MethodPost, s.origin+"/api/macos/maintenance", strings.NewReader(`{"action":"open","maintenance":"sharing"}`))
@@ -339,31 +346,30 @@ func TestMacOSSharingMaintenanceRequiresIsolation(t *testing.T) {
 
 func TestCloseMacOSScreenSharingOnStop(t *testing.T) {
 	s := testServer(t)
-	writeScreenSharingSSHConfig(t, s, 55413)
+	startScreenSharingGuest(t, s)
 	s.macosGuest = &guestos.MacOSProfile{Instance: "mac", User: "blue"}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	s.ready = true
+	rfb, err := s.inspectMacOSScreenSharingRFB(t.Context())
+	if err != nil || !rfb.Handshake || rfb.Denied || rfb.Types != 1 {
+		t.Fatalf("status via SSH stdio: %+v, %v", rfb, err)
+	}
+	port, err := s.ensureMacOSScreenSharingTunnel(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
-	cmd := exec.CommandContext(ctx, "sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	s.screenSharing = &macOSScreenSharing{cmd: cmd, cancel: cancel, port: ln.Addr().(*net.TCPAddr).Port}
+	done := s.screenSharing.done
 	s.closeMacOSScreenSharing()
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("stop did not tear down the ssh child")
+	default:
+		t.Fatal("stop returned before the SSH process was reaped")
 	}
-	if cmd.ProcessState == nil {
-		t.Fatal("stopped process was not reaped")
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err == nil {
+		conn.Close()
+		t.Fatal("the local forward still accepts connections after stop")
 	}
+
 }
 
 func screenSharingRequest(s *Server, trusted bool, body string) *httptest.ResponseRecorder {
@@ -391,61 +397,89 @@ func writeScreenSharingSSHConfig(t *testing.T, s *Server, port int) {
 	}
 }
 
-func containsArg(args []string, value string) bool {
-	for _, arg := range args {
-		if arg == value {
-			return true
-		}
-	}
-	return false
-}
-
-func forwardPort(t *testing.T, args []string) int {
+// Run the real OpenSSH client against an isolated server. Accept only the
+// ordinary user and SSH forwarding channels aimed at guest loopback:5900.
+func startScreenSharingGuest(t *testing.T, s *Server) (*atomic.Int32, func()) {
 	t.Helper()
-	for i, arg := range args {
-		if arg != "-L" || i+1 >= len(args) {
-			continue
-		}
-		// 127.0.0.1:PORT:127.0.0.1:5900
-		parts := strings.Split(args[i+1], ":")
-		if len(parts) < 4 {
-			t.Fatalf("forward %q", args[i+1])
-		}
-		port, err := strconv.Atoi(parts[1])
-		if err != nil {
-			t.Fatal(err)
-		}
-		return port
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS guest tunnels use the host's Unix OpenSSH client")
 	}
-	t.Fatalf("missing -L in %q", args)
-	return 0
-}
-
-func startRFBStub(t *testing.T, ctx context.Context, port int) *exec.Cmd {
-	t.Helper()
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { ln.Close() })
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+	writeScreenSharingSSHConfig(t, s, ln.Addr().(*net.TCPAddr).Port)
+	if err := os.WriteFile(filepath.Join(s.profile, "macos-known-hosts"), []byte("cage-macos "+string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var connections atomic.Int32
+	var clients sync.WaitGroup
+	stopped := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
-	go func() {
+		defer close(stopped)
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			_, _ = conn.Write([]byte("RFB 003.008\n"))
-			var echoed [12]byte
-			_, _ = io.ReadFull(conn, echoed[:])
-			_, _ = conn.Write([]byte{1, 30})
-			_, _ = io.Copy(io.Discard, conn)
-			conn.Close()
+			clients.Add(1)
+			go func() {
+				defer clients.Done()
+				defer conn.Close()
+				server, channels, requests, err := ssh.NewServerConn(conn, config)
+				if err != nil {
+					return
+				}
+				defer server.Close()
+				connections.Add(1)
+				if server.User() != "blue" {
+					t.Errorf("unexpected SSH user %q", server.User())
+					return
+				}
+				go ssh.DiscardRequests(requests)
+				for incoming := range channels {
+					var target struct {
+						Host       string
+						Port       uint32
+						Origin     string
+						OriginPort uint32
+					}
+					if incoming.ChannelType() != "direct-tcpip" || ssh.Unmarshal(incoming.ExtraData(), &target) != nil || target.Host != "127.0.0.1" || target.Port != 5900 {
+						_ = incoming.Reject(ssh.Prohibited, "unexpected destination")
+						continue
+					}
+					channel, requests, err := incoming.Accept()
+					if err != nil {
+						return
+					}
+					go ssh.DiscardRequests(requests)
+					fmt.Fprint(channel, "RFB 003.889\n")
+					var reply [12]byte
+					if _, err = io.ReadFull(channel, reply[:]); err == nil && string(reply[:]) == "RFB 003.008\n" {
+						_, _ = channel.Write([]byte{1, 30})
+					}
+					channel.Close()
+				}
+			}()
 		}
 	}()
-	t.Cleanup(func() { ln.Close() })
-	// The API starts this process; hook only prepares the listening stub.
-	return exec.CommandContext(ctx, "sleep", "30")
+	shutdown := func() {
+		s.closeMacOSScreenSharing()
+		ln.Close()
+		<-stopped
+		clients.Wait()
+	}
+	t.Cleanup(shutdown)
+	return &connections, shutdown
 }

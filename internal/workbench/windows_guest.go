@@ -159,6 +159,9 @@ func (s *Server) attachWindowsGuestContext(parent context.Context) error {
 	if err == nil {
 		err = s.ensureProjectShare(s.environmentDir())
 	}
+	if err == nil {
+		err = s.syncNativeBrowserProfile(ctx)
+	}
 	s.mu.Lock()
 	if s.storageRecoveryError != "" {
 		err = errors.New(s.storageRecoveryError)
@@ -212,9 +215,6 @@ func waitWindowsBoot(ctx context.Context, interval time.Duration, attach func(co
 
 func (s *Server) startWindowsGuest() error {
 	if err := s.requireStorageReady(); err != nil {
-		return err
-	}
-	if err := requireHostGit(s.operationContext()); err != nil {
 		return err
 	}
 	cfg, err := loadConfig(s.configPath)

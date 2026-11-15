@@ -1,4 +1,5 @@
-import { lines } from "./browser-protocol.mjs";
+import { lines, checkedBrowserProfile, browserProfileFlags } from "./browser-protocol.mjs";
+import { collectDeviceObservation } from "./device-observation.mjs";
 export { lines };
 import { createTailnetClient } from "./tailnet-client.mjs";
 // The GUI-session broker owns this process. Playwright uses inherited DevTools
@@ -135,7 +136,18 @@ export function createNativeBrowserService(options = {}) {
   const destination = options.downloadDirectory ?? path.join(homedir(), "Downloads", "Cage");
   let context, owner, browserCDP, initialized, closing, proxy, networkMode = "proxy", configured = false;
   let active = "", home = options.homepage ?? "https://www.bing.com/", displayScale = options.displayScale ?? 2;
+  const homepageRedirects = new WeakMap();
+  const isNativeNewTab = url => /^chrome:\/\/(newtab|new-tab-page|new-tab-page-third-party)\/?(?:[?#].*)?$/.test(url);
+  function restoreHomepage(page) {
+    if (page.isClosed() || !isNativeNewTab(page.url())) return Promise.resolve();
+    if (homepageRedirects.has(page)) return homepageRedirects.get(page);
+    const pending = page.goto(home, { waitUntil: "commit", timeout: 8000 })
+      .finally(() => homepageRedirects.delete(page));
+    homepageRedirects.set(page, pending);
+    return pending;
+  }
   let timezone, language;
+  let creationProfile;
   let viewport = { width: 1140, height: 700 }, persistQueue = Promise.resolve();
   const tabs = new Map(), byPage = new WeakMap(), sessions = new Map(), frameSessions = new WeakMap(), internalPages = new WeakSet();
   const captures = new Map(), stoppingCaptures = new Map();
@@ -345,10 +357,10 @@ export function createNativeBrowserService(options = {}) {
   async function captureFrame(tab) {
     await stoppingCaptures.get(tab.page);
     const size = tab.page.viewportSize();
-    // HiDPI surface scaling also affects native menus. Keep the established
-    // screenshot path by default until the native popup comparison is verified.
-    const streaming = continuousFrames && !tab.captureFallback &&
-      (displayScale === 1 || options.continuousFrames === true);
+    // Windows native menus do not follow the compositor's emulated scale.
+    // Keep HiDPI on full-density screenshots, even with continuousFrames opted
+    // in, so page pixels and native overlays share one physical-pixel mapping.
+    const streaming = continuousFrames && !tab.captureFallback && displayScale === 1;
     const key = `${tab.document}:${tab.geometry}:${size.width}:${size.height}:${displayScale}`;
     let capture = captures.get(tab.page);
     if (capture && capture.key !== key) { await stopCapture(tab.page); capture = undefined; }
@@ -552,6 +564,7 @@ export function createNativeBrowserService(options = {}) {
     });
     page.on("framenavigated", frame => {
       if (frame === page.mainFrame()) {
+        void restoreHomepage(page).catch(() => {});
         if (active === id) invalidateCopies();
         if (tab.kind !== "editor") {
           try {
@@ -601,6 +614,7 @@ export function createNativeBrowserService(options = {}) {
     }
     })();
     await tab.ready;
+    await restoreHomepage(page);
     if (!active) active = id;
     changed(); return tab;
   }
@@ -637,6 +651,11 @@ export function createNativeBrowserService(options = {}) {
           await import(new URL("./modules/browser-vault.mjs", import.meta.url)));
       } catch { throw failure("browser_unavailable", "Windows 客机浏览器组件尚未完整安装"); }
       await mkdir(directory, { recursive: true, mode: 0o700 });
+      if (!creationProfile) {
+        try { creationProfile = checkedBrowserProfile(JSON.parse(await readFile(path.join(directory, "guest-profile.json"), "utf8"))); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+      if (creationProfile) viewport = { width: creationProfile.browser_width, height: creationProfile.browser_height };
       // Remove only this controller's scratch uploads. Profiles, downloads and
       // editor buffers are persistent and are never initialized away.
       await rm(uploadDirectory, { recursive: true, force: true });
@@ -650,7 +669,7 @@ export function createNativeBrowserService(options = {}) {
           ...(networkMode === "proxy" ? { proxy: { server: proxy, bypass: proxyBypass } } : {}),
           // CDP transports the user's input. Preserve the native browser identity
           // in every context, including private pages that cannot load extensions.
-          args: ["--disable-blink-features=AutomationControlled", "--disable-quic", "--no-first-run", "--no-default-browser-check", "--restore-last-session", "--disable-session-crashed-bubble", "--host-resolver-rules=MAP *.cage-editor.localhost 127.0.0.1", ...(networkMode === "packet" ? ["--no-proxy-server"] : []), ...(extensionTools ? ["--enable-unsafe-extension-debugging", `--load-extension=${splitDirectory}`] : [])],
+          args: [...(creationProfile ? browserProfileFlags(creationProfile, mac ? "darwin" : options.testing ? process.platform : "win32") : []),"--disable-blink-features=AutomationControlled", "--disable-quic", "--no-first-run", "--no-default-browser-check", "--restore-last-session", "--disable-session-crashed-bubble", "--host-resolver-rules=MAP *.cage-editor.localhost 127.0.0.1", ...(networkMode === "packet" ? ["--no-proxy-server"] : []), ...(extensionTools ? ["--enable-unsafe-extension-debugging", `--load-extension=${splitDirectory}`] : [])],
           ignoreDefaultArgs: ["--enable-automation", ...(extensionTools ? ["--disable-extensions"] : []), ...(mac ? ["--mute-audio"] : [])], timeout: 20000,
         });
       } catch (error) { if (error.code) throw error; throw failure("browser_unavailable", "Windows 客机图形浏览器未能启动，请检查 GUI 会话和安装组件"); }
@@ -1180,6 +1199,18 @@ export function createNativeBrowserService(options = {}) {
     signal?.throwIfAborted();
     if (method === "POST" && route === "/tailnet") return tailnet.request(input);
     if (operation === "configure") return configure(input);
+    if (method === "POST" && route === "/profile") {
+      const value = checkedBrowserProfile(input);
+      if (creationProfile && JSON.stringify(creationProfile) !== JSON.stringify(value)) throw failure("invalid_configuration", "创建配置已保存，请继续原环境");
+      if (context && !creationProfile) throw failure("browser_restart_required", "请关闭客机浏览器后重新连接，以应用创建配置");
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const file = path.join(directory, "guest-profile.json"), encoded = JSON.stringify(value);
+      try { await writeFile(file, encoded, { flag: "wx", mode: 0o600 }); }
+      catch (error) { if (error.code !== "EEXIST" || JSON.stringify(checkedBrowserProfile(JSON.parse(await readFile(file, "utf8")))) !== encoded) throw error; }
+      creationProfile = value;
+      viewport = { width: value.browser_width, height: value.browser_height };
+      return { ok: true };
+    }
     if (operation === "input-release-pointer") {
       const held = rfbPointer, mask = rfbMask;
       rfbMask = 0; rfbPane = undefined; rfbPointer = undefined;
@@ -1190,6 +1221,16 @@ export function createNativeBrowserService(options = {}) {
       return { ok: true };
     }
     if (operation === "input-reset") { rfbMask = 0; heldKeys.clear(); rfbPane = undefined; rfbPointer = undefined; pointer = undefined; return { ok: true }; }
+    if (operation === "input-focus-page") {
+      const tab = target(input);
+      const geometry = split?.generation ?? tab.geometry;
+      if (input.target !== geometry) throw failure("target_changed", "Input target changed");
+      await tab.page.bringToFront();
+      const proof = await nativeFrameProof();
+      if (proof.id !== input.id || proof.document !== input.document || proof.target !== geometry)
+        throw failure("target_changed", "Input target changed");
+      return proof;
+    }
     if (operation === "input-select-pane") {
       const tab = tabs.get(active);
       if (input.target !== (split?.generation ?? tab?.geometry) || !Number.isFinite(input.x) || input.x < 0 || input.x >= viewport.width * displayScale) throw failure("target_changed", "Input target changed");
@@ -1257,9 +1298,13 @@ export function createNativeBrowserService(options = {}) {
       const context = await owner.newContext({ viewport, deviceScaleFactor: displayScale, ...(timezone ? { timezoneId: timezone } : {}), ...(language ? { locale: language } : {}), ...(networkMode === "proxy" ? { proxy: { server: proxy, bypass: proxyBypass } } : {}) });
       privateContexts.add(context);
       const entry = { context, expiry: setTimeout(() => { logins.delete(input.login); privateContexts.delete(context); void context.close().catch(() => {}); }, 15 * 60000) }; entry.expiry.unref(); logins.set(input.login, entry);
-      context.on("page", page => { void addPage(page, { login: true }).then(tab => activate(tab.id)).catch(() => {}); });
-      const page = await context.newPage(), tab = await addPage(page, { login: true });
-      await page.goto(url.href, { waitUntil: "commit", timeout: 8000 }); await activate(tab.id); return { id: tab.id };
+      const page = await context.newPage();
+      const tab = await addPage(page, { login: true });
+      await activate(tab.id);
+      context.on("page", popup => { void addPage(popup, { login: true }).then(next => activate(next.id)).catch(() => {}); });
+      await page.goto(url.href, { waitUntil: "commit", timeout: 8000 });
+      const current = tabs.get(active);
+      return { id: current?.page.context() === context ? current.id : tab.id };
     }
     if (action === "audit") {
       if (options.audit) return options.audit(context, input);
@@ -1270,6 +1315,7 @@ export function createNativeBrowserService(options = {}) {
       try {
         const auditPage = await isolated.newPage();
         const result = await auditPage.evaluate(() => ({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, language: navigator.language, platform: navigator.platform }));
+        if (input.device === true) result.device = await auditPage.evaluate(collectDeviceObservation);
         result.expected_timezone = expected;
         if (input.network === true) {
           try {
@@ -1298,7 +1344,11 @@ export function createNativeBrowserService(options = {}) {
       if (url !== "about:blank") await page.goto(url, { waitUntil: "commit", timeout: 8000 });
       remember(); return { id: tab.id };
     }
-    if (action === "homepage") { home = checkedBrowserURL(input.url); return { ok: true }; }
+    if (action === "homepage") {
+      home = checkedBrowserURL(input.url);
+      for (const tab of tabs.values()) await restoreHomepage(tab.page);
+      return { ok: true };
+    }
     if (action === "resize") {
       if (![input.width, input.height].every(Number.isInteger) || input.width < 320 || input.height < 240 || input.width > 8192 || input.height > 8192 || input.width * input.height > 16000000) throw failure("invalid_input", "Invalid display size");
       viewport = { width: Math.ceil(input.width / displayScale), height: Math.ceil(input.height / displayScale) };

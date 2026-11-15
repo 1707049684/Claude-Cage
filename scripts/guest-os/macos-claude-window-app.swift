@@ -285,7 +285,7 @@ private func handle(_ input: Request, inputSession: MacWindowInputSession) async
     case "audio-status":
         return MacAudioCapture.status()
     case "setup-status":
-        return ["screen": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted()]
+        return ["screen": CGPreflightScreenCaptureAccess(), "input": AXIsProcessTrusted(), "project_install_required": MacProjectSetup.needsInstaller]
     case "setup-password-focus":
         return try MacSetupPassword.probe()
     case "setup-screen", "setup-input", "setup-projects", "setup-sharing":
@@ -300,7 +300,8 @@ private func handle(_ input: Request, inputSession: MacWindowInputSession) async
         } else if input.action == "setup-sharing" {
             purpose = "sharing"
         } else {
-            let vendor = URL(fileURLWithPath: "/Applications/macFUSE.app")
+            if try await MacProjectSetup.openInstallerIfNeeded() { return ["ok": true] }
+            let vendor = MacProjectSetup.vendorURL
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = false
             _ = try await NSWorkspace.shared.openApplication(at: vendor, configuration: configuration)

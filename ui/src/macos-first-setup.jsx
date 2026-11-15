@@ -12,7 +12,7 @@ const steps = [
   { id: "screen", label: "窗口录制", hint: "打开 Cage Guest Window 的窗口录制开关。如果提示「退出并重新打开」，按提示操作。" },
   { id: "input", label: "辅助功能", hint: "打开 Cage Guest Window 的辅助功能开关，允许 Cage 操作客机窗口。" },
   { id: "projects", label: "文件系统扩展", hint: "打开 macFUSE 和 macFUSE (local) 两个开关，用于在客机中访问你选择的项目。" },
-  { id: "sharing", label: "屏幕共享", hint: "在「系统设置 → 通用 → 共享」中打开「屏幕共享」，并允许当前普通客机用户访问。macOS 26 仅命令行启用后，仍需再手动打开一次，否则连接可能提示「屏幕共享在 localhost 上不被允许」。Cage 会检查服务、5900 端口和 RFB 握手是否可用。" },
+  { id: "sharing", label: "屏幕共享", hint: "在「系统设置 → 通用 → 共享」中打开「屏幕共享」，并允许当前普通客机用户访问。确认开关已打开后，点击「已开启，重新检查」。Cage 会尝试连接客机的屏幕共享服务。" },
 ];
 
 export function MacOSFirstSetup() {
@@ -22,13 +22,14 @@ export function MacOSFirstSetup() {
   const [permissions, setPermissions] = useState({});
   const [error, setError] = useState("");
   const [readError, setReadError] = useState("");
+  const [desktopWaiting, setDesktopWaiting] = useState(false);
   const [completionFailed, setCompletionFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [diagnostics, setDiagnostics] = useState(false);
   const [details, setDetails] = useState(false);
   const current = useRef({ account, refresh });
   current.current = { account, refresh };
-  const control = useRef({ active: false, inFlight: false, started: false, finished: false, requested: "", pending: "" });
+  const control = useRef({ active: false, inFlight: false, started: false, finished: false, measured: false, waitingSince: 0, requested: "", pending: "" });
 
   async function request(action) {
     const lifecycle = action === "start" || action === "stop";
@@ -65,18 +66,30 @@ export function MacOSFirstSetup() {
         catch (e) { if (c.active) setError(e.message); }
         return;
       }
-      if (!next.ready || next.job?.running || credentialsPending) { setReadError(""); return; }
-      const measured = await request("permissions");
+      if (!next.ready || next.job?.running || credentialsPending) { setReadError(""); setDesktopWaiting(false); return; }
+      let measured;
+      try { measured = await request("permissions"); }
+      catch (e) {
+        // Right after boot the guest is still signing in its ordinary user;
+        // its window helper starts with the desktop. That is progress, not a failure.
+        c.waitingSince ||= Date.now();
+        if (!c.measured && Date.now() - c.waitingSince < 5 * 60 * 1000) { if (c.active) { setReadError(""); setDesktopWaiting(true); } return; }
+        if (c.active) setDesktopWaiting(false);
+        throw e;
+      }
       if (!c.active) return;
+      c.measured = true;
+      setDesktopWaiting(false);
       setReadError("");
       setPermissions(measured);
       const pending = steps.find(({ id }) => !measured[id]);
+      const requestKey = pending?.id === "projects" ? `projects:${Boolean(measured.project_install_required)}` : pending?.id;
       if (pending && c.pending !== pending.id) {
         c.pending = pending.id;
         setPermissionPage(pending.id);
       }
-      if (measured.managed_credential && pending && c.requested !== pending.id) {
-        c.requested = pending.id;
+      if (measured.managed_credential && pending && c.requested !== requestKey) {
+        c.requested = requestKey;
         setPermissionPage(pending.id);
         setBusy(true);
         try { await request(pending.id); setError(""); }
@@ -115,7 +128,7 @@ export function MacOSFirstSetup() {
     if (c.inFlight) return;
     c.inFlight = true;
     if (action === "stop") c.started = true;
-    if (steps.some(({ id }) => id === action)) { setPermissionPage(action); c.requested = action; }
+    if (steps.some(({ id }) => id === action)) { setPermissionPage(action); c.requested = action === "projects" ? `projects:${Boolean(permissions.project_install_required)}` : action; }
     setBusy(true); setError("");
     try {
       await request(action);
@@ -128,21 +141,24 @@ export function MacOSFirstSetup() {
 
   const pending = steps.find(({ id }) => !permissions[id]);
   const selected = steps.find(({ id }) => id === permissionPage);
+  const projectInstallation = permissionPage === "projects" && permissions.project_install_required;
+  const selectedHint = projectInstallation ? "先在客机中完成 macFUSE 官方安装器的安装与管理员授权。安装完成后，Cage 会打开文件系统扩展设置，再开启两个开关。" : selected.hint;
   const running = Boolean(state?.job?.running);
   const canOperate = Boolean(state?.vm_running && !running && !busy);
   const canFinish = Boolean(state?.ready && !account.macos_password_pending && !pending && !readError);
   const progress = !state ? "正在读取安装进度…" : running ? state.job.message || "正在启动和配置虚拟 Mac…" :
     account.macos_password_pending ? "客机密码尚未同步，请重试同步后继续授权。" : !state.vm_running ? "虚拟 Mac 尚未启动，可从已有磁盘继续。" :
     !state.ready ? "虚拟 Mac 已启动，正在等待客机连接。若停在登录画面，请打开客机画面完成登录。" :
+    desktopWaiting ? "虚拟 Mac 正在完成首次登录并启动桌面，通常需要 1–3 分钟。桌面就绪后会自动打开第一项授权。" :
     readError ? "暂时无法确认权限状态，已显示的结果供参考。恢复连接后会继续检查。" :
     pending ? `当前需要确认「${pending.label}」。完成后 Cage 会自动检查并继续。` :
     completionFailed ? "四项权限已验证，最后的设置收尾未完成。请重试完成设置。" : "四项权限已验证，正在保存设置；随后继续工作区授权和联网检查。";
   const sharingControls = <>
     <button type="button" disabled={!canOperate} onClick={() => act("sharing")}>{busy ? "正在处理…" : "打开屏幕共享设置"}</button>
-    <button type="button" className="primary" disabled={!canOperate} onClick={() => act("check-sharing")}>{busy ? "正在检查…" : "重新检查屏幕共享"}</button>
+    <button type="button" className="primary" disabled={!canOperate} onClick={() => act("confirm-sharing")}>{busy ? "正在检查…" : "已开启，重新检查"}</button>
   </>;
   const controls = pending?.id === "sharing" ? sharingControls : <button type="button" className="primary" disabled={!canOperate} onClick={() => act(pending?.id || permissionPage)}>
-    {busy ? "正在处理…" : `打开${pending?.label || selected.label}`}
+    {busy ? "正在处理…" : projectInstallation ? "打开 macFUSE 安装器" : `打开${pending?.label || selected.label}`}
   </button>;
   const failure = error || readError || (!running && state?.job?.error) || (!state?.ready && state?.environment_update_error);
 
@@ -158,7 +174,7 @@ export function MacOSFirstSetup() {
     <section className="initialization-operation mac-setup-task" aria-label="当前设置步骤">
       <h2>{!state?.ready ? "连接虚拟 Mac" : pending ? `确认${pending.label}` : "完成系统设置"}</h2>
       <p role="status">{busy && <LoaderCircle size={16} className="spin" aria-hidden="true" />} {progress}</p>
-      {pending && state?.ready && <><p>{selected.hint}</p>
+      {pending && state?.ready && <><p>{selectedHint}</p>
         {pending.id === "projects" && permissions.projects_error && <p>{permissions.projects_error}</p>}
         {pending.id === "sharing" && <ScreenSharingChecks checks={permissions.sharing_checks} summary={permissions.sharing_summary} />}
       </>}
@@ -170,7 +186,7 @@ export function MacOSFirstSetup() {
       </div>
       {running && <button disabled={busy} onClick={() => act("stop")}>停止当前操作，保留进度</button>}
       {state?.vm_running && <MacOSLogin initialSetup autoOpen={Boolean(permissions.managed_credential)} managedCredential={permissions.managed_credential} disabled={!canOperate}
-        label="打开客机画面" setupActions={controls} setupHint={`${selected.hint} 系统要求管理员时，用户名填 cagesetup；选中密码框后可点击「填写授权密码」。`}
+        label="打开客机画面" setupActions={controls} setupHint={`${selectedHint} 系统要求管理员时，用户名填 cagesetup；选中密码框后可点击「填写授权密码」。`}
         setupStatus={failure || progress} setupError={Boolean(failure)} />}
     </section>
     {failure && <section className="initialization-notice" role="alert"><h2>这一步尚未完成</h2><p>{failure}</p><p>已有安装进度会保留。可以重新打开当前设置页，或重新检查状态后继续。</p></section>}
