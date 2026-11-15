@@ -834,23 +834,37 @@ export function createNativeBrowserService(options = {}) {
   }
   async function nativeDocumentFocused(tab) {
     const tree = await cdp("Page.getFrameTree", {}, tab.session);
-    const isolated = await cdp("Page.createIsolatedWorld", { frameId: tree.frameTree.frame.id, worldName: "cage-native-window-proof" }, tab.session);
-    const focus = await cdp("Runtime.evaluate", { expression: "Document.prototype.hasFocus.call(document)", contextId: isolated.executionContextId, returnByValue: true }, tab.session);
+    const frame = tree.frameTree.frame, key = `${frame.id}:${frame.loaderId}`;
+    const expression = "Document.prototype.hasFocus.call(document)";
+    // Every frame asks each tab for focus. The isolated world lives as long as
+    // its document, so it is created once per document, not once per question.
+    if (tab.focusWorld?.key === key) {
+      const focus = await cdp("Runtime.evaluate", { expression, contextId: tab.focusWorld.context, returnByValue: true }, tab.session).catch(() => undefined);
+      if (focus && !focus.exceptionDetails) return focus.result?.value === true;
+    }
+    tab.focusWorld = undefined;
+    const isolated = await cdp("Page.createIsolatedWorld", { frameId: frame.id, worldName: "cage-native-window-proof" }, tab.session);
+    const focus = await cdp("Runtime.evaluate", { expression, contextId: isolated.executionContextId, returnByValue: true }, tab.session);
+    if (!focus.exceptionDetails) tab.focusWorld = { key, context: isolated.executionContextId };
     return focus.result?.value === true;
   }
-  async function syncNativeFrontTab() {
+  // focused is the one tab whose document was just seen holding focus.
+  async function frontTabFocus() {
     const old = tabs.get(active);
-    if (old && !old.page.isClosed() && await nativeDocumentFocused(old).catch(() => false)) return false;
+    if (old && !old.page.isClosed() && await nativeDocumentFocused(old).catch(() => false)) return { ambiguous: false, focused: old };
     const focused = [];
     for (const tab of tabs.values()) if (tab !== old && !tab.page.isClosed() && await nativeDocumentFocused(tab).catch(() => false)) focused.push(tab);
     if (focused.length === 1) { active = focused[0].id; changed(); }
-    return focused.length > 1;
+    return { ambiguous: focused.length > 1, focused: focused.length === 1 ? focused[0] : undefined };
+  }
+  async function syncNativeFrontTab() {
+    return (await frontTabFocus()).ambiguous;
   }
   async function nativeFrameProof() {
-    const focusAmbiguous = await syncNativeFrontTab();
+    const front = await frontTabFocus(), focusAmbiguous = front.ambiguous;
     const tab = target({ id: active });
     const native = await browserCDP.send("Browser.getWindowForTarget", { targetId: tab.nativeTarget });
-    const documentFocused = await nativeDocumentFocused(tab);
+    const documentFocused = front.focused === tab || await nativeDocumentFocused(tab);
     const size = tab.page.viewportSize();
     return { target: split?.generation ?? tab.geometry, document: tab.document, id: tab.id, window: native, documentFocused, focusAmbiguous, blankDocument: tab.page.url() === "about:blank",
       x: split?.right === tab.id ? Math.round(tabs.get(split.left).page.viewportSize().width * displayScale) : 0, y: 0,

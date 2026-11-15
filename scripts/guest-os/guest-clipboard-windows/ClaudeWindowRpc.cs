@@ -102,20 +102,44 @@ internal static class ClaudeWindowRpc
         return new Registration(Path.Combine(p.InstalledPath, "app", "Claude.exe"), $"{version.Major}.{version.Minor}.{version.Build}.{version.Revision}");
     }
 
+    // Every request needs the Claude window. The process found last is tried
+    // first with the same checks, so a frame or pointer move does not list all
+    // processes and open each Claude helper process to read its module path.
+    private static int knownProcess;
+    private static Window? Candidate(Process p, int session, string executable)
+    {
+        if (p.SessionId != session || !string.Equals(p.MainModule?.FileName, executable, StringComparison.OrdinalIgnoreCase)) return null;
+        var handle = p.MainWindowHandle;
+        var w = new Window(p, handle, default, executable);
+        Validate(w, false);
+        if (!GetClientRect(handle, out var bounds) || bounds.Right < 1 || bounds.Bottom < 1 || (long)bounds.Right * bounds.Bottom > 40_000_000)
+            throw new InvalidDataException("desktop_size_invalid");
+        return w with { Bounds = bounds };
+    }
+
     private static Window Find(string executable)
     {
-        var session = Process.GetCurrentProcess().SessionId;
+        int session;
+        using (var self = Process.GetCurrentProcess()) session = self.SessionId;
+        var known = Volatile.Read(ref knownProcess);
+        if (known != 0)
+        {
+            Process? p = null;
+            try
+            {
+                p = Process.GetProcessById(known);
+                if (string.Equals(p.ProcessName, "Claude", StringComparison.OrdinalIgnoreCase) && Candidate(p, session, executable) is { } w) return w;
+            }
+            catch { }
+            p?.Dispose();
+            Volatile.Write(ref knownProcess, 0);
+        }
         foreach (var p in Process.GetProcessesByName("Claude"))
         {
             try
             {
-                if (p.SessionId != session || !string.Equals(p.MainModule?.FileName, executable, StringComparison.OrdinalIgnoreCase)) { p.Dispose(); continue; }
-                var handle = p.MainWindowHandle;
-                var w = new Window(p, handle, default, executable);
-                Validate(w, false);
-                if (!GetClientRect(handle, out var bounds) || bounds.Right < 1 || bounds.Bottom < 1 || (long)bounds.Right * bounds.Bottom > 40_000_000)
-                    throw new InvalidDataException("desktop_size_invalid");
-                return w with { Bounds = bounds };
+                if (Candidate(p, session, executable) is { } w) { Volatile.Write(ref knownProcess, p.Id); return w; }
+                p.Dispose();
             }
             catch { p.Dispose(); }
         }
