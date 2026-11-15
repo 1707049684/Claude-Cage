@@ -170,7 +170,7 @@ export function useDesktopFiles(ready, onStatus, desktopVisible, windowVisible =
       if (!disposed) timer = setTimeout(poll, desktopFilesPollDelay(failures, windowShown.current));
     };
     wake.current = () => {
-      if (disposed || polling || failures) return;
+      if (disposed || polling) return;
       clearTimeout(timer);
       void poll();
     };
