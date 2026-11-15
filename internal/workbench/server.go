@@ -555,7 +555,7 @@ func (s *Server) handler() http.Handler {
 			mux.ServeHTTP(w, r)
 			return
 		}
-		if s.windowsGuest != nil && !windowsWorkbenchRoute(r.URL.Path) {
+		if s.windowsGuest != nil && (!windowsWorkbenchRoute(r.URL.Path) || s.windowsGuest.Remote() && strings.HasPrefix(r.URL.Path, "/api/projects/")) {
 			s.windowsUnavailable(w)
 			return
 		}
@@ -591,7 +591,7 @@ func (s *Server) handler() http.Handler {
 		bootstrapRoute := r.URL.Path == "/api/session" || r.URL.Path == "/api/launch" || r.URL.Path == "/api/handoff" || r.URL.Path == "/api/remote/manifest"
 		trustedDesktop := s.hasTrustedView(r)
 		phoneRoom := s.pairedPhoneRoom(r)
-		if (s.windowsGuest != nil || s.macosGuest != nil) && strings.HasPrefix(r.URL.Path, "/api/") && !bootstrapRoute && !trustedDesktop && phoneRoom == nil {
+		if (s.windowsGuest != nil || s.macosGuest != nil) && strings.HasPrefix(r.URL.Path, "/api/") && !bootstrapRoute && !trustedDesktop && phoneRoom == nil && !s.hasRemoteWindowsView(r) {
 			http.Error(w, "请通过本机 Cage 窗口或当前配对手机打开客机", http.StatusForbidden)
 			return
 		}
@@ -703,6 +703,13 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.windowsGuest != nil {
 		view["guest_system"] = guestos.Windows11
+		if s.windowsGuest.Remote() {
+			view["guest_system"] = "windows-remote"
+			view["workspace"] = s.windowsState.Home
+			view["projects"] = []string{}
+			view["project_groups"] = []projectGroup{}
+			view["workload_ready"] = false
+		}
 		view["guest_capabilities"] = s.windowsCapabilitiesLocked()
 		view["location"] = nil
 		if s.safety.Gate == nil && view["network_error"] == "" {
