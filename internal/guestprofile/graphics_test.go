@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestHardwareBackendsEnableGPUCompositing(t *testing.T) {
-	acceleration := []string{"--enable-gpu-rasterization", "--enable-zero-copy", "--enable-accelerated-2d-canvas"}
+func TestHardwareBackendsRequestGPUAcceleration(t *testing.T) {
+	acceleration := []string{"--enable-gpu-rasterization", "--enable-zero-copy"}
 	for _, tc := range []struct {
 		backend string
 		angle   string

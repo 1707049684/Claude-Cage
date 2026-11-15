@@ -167,7 +167,7 @@ final class MacChromeWindow {
         if backend != "auto" {
             flags += ["--use-gl=angle", "--use-angle=" + (backend == "opengl" ? "gl" : backend == "software" ? "swiftshader" : "metal")]
             if backend != "software" {
-                flags += ["--enable-gpu-rasterization", "--enable-zero-copy", "--enable-accelerated-2d-canvas"]
+                flags += ["--enable-gpu-rasterization", "--enable-zero-copy"]
             }
         }
         if value.webgl == "disabled" { flags += ["--disable-3d-apis", "--disable-webgl"] }

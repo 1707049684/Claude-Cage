@@ -16,7 +16,7 @@ test("creation preferences accept only bounded typed fields", () => {
 });
 test("real graphics APIs are selected only for compatible guest platforms", () => {
   const native = { ...options, webgl: "native", canvas: "native" };
-  const acceleration = ["--enable-gpu-rasterization", "--enable-zero-copy", "--enable-accelerated-2d-canvas"];
+  const acceleration = ["--enable-gpu-rasterization", "--enable-zero-copy"];
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "metal" }, "darwin"),
     ["--window-size=1280,800", "--use-gl=angle", "--use-angle=metal", ...acceleration]);
   assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "d3d11" }, "win32"),
@@ -55,4 +55,37 @@ test("Windows saves creation choices before browser startup and reuses them on r
     assert.deepEqual(await request(options), { ok: true });
     assert.equal(launches, 0);
   } finally { await service.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("browser startup uses the persisted graphics backend without obsolete Canvas switches", async t => {
+  const { createWindowsBrowserService } = await import("../windows-browser.mjs");
+  const hardware = { darwin: "metal", win32: "d3d11", linux: "vulkan" }[process.platform];
+  for (const backend of [hardware, "software", "auto"]) {
+    await t.test(backend, async () => {
+      const directory = await mkdtemp(path.join(tmpdir(), "browser-graphics-test-"));
+      let launched;
+      const create = () => createWindowsBrowserService({ directory, testing: true, executablePath: "fixture-browser", modules: {}, chromium: {
+        launchPersistentContext(_directory, options) {
+          launched = options;
+          throw Object.assign(new Error("captured launch options"), { code: "launch_captured" });
+        },
+      } });
+      let service = create();
+      try {
+        await service.request({ method: "POST", path: "/profile", input: { ...options, webgl: "native", graphics_backend: backend } });
+        await service.close();
+        service = create();
+        await service.request({ operation: "configure", input: { proxy: "http://127.0.0.1:18501" } });
+        await assert.rejects(service.request({ method: "GET", path: "/tabs", input: {} }), { code: "launch_captured" });
+        const accelerated = backend === hardware;
+        for (const flag of ["--enable-gpu-rasterization", "--enable-zero-copy"])
+          assert.equal(launched.args.includes(flag), accelerated);
+        assert.ok(!launched.args.includes("--enable-accelerated-2d-canvas"));
+        assert.ok(!launched.args.includes("--ignore-gpu-blocklist"));
+        assert.equal(launched.chromiumSandbox, true);
+        assert.ok(launched.args.includes("--window-size=1280,800"));
+        assert.equal(launched.args.includes("--use-angle=swiftshader"), backend === "software");
+      } finally { await service.close(); await rm(directory, { recursive: true, force: true }); }
+    });
+  }
 });

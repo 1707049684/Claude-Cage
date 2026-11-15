@@ -43,6 +43,26 @@ func TestPhysicalInterfaceFollowsHardwareRouteAndSkipsVirtualNICs(t *testing.T) 
 	}
 }
 
+func TestPhysicalInterfaceRejectsAppleVirtualNetwork(t *testing.T) {
+	hardware := "Hardware Port: VM Network\nDevice: vmenet0\nHardware Port: Wi-Fi\nDevice: en0\n"
+	nwi := "IPv4 network interface information\n vmenet0 : flags : 0x7\n reach : 0x00000002 (Reachable)\n en0 : flags : 0x7\n reach : 0x00000002 (Reachable)\nIPv6 network interface information\n"
+	for _, tc := range []struct {
+		name   string
+		usable map[string]bool
+		want   string
+	}{
+		{"physical fallback", map[string]bool{"vmenet0": true, "en0": true}, "en0"},
+		{"no physical fallback", map[string]bool{"vmenet0": true}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectPhysicalInterface("interface: vmenet0", hardware, nwi, tc.usable)
+			if got != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBindingPreservesProxyChainAndReplacesStaleNodeBinding(t *testing.T) {
 	data := []byte("interface-name: en0\nrules: ['MATCH,exit']\nproxies:\n - {name: entry, type: socks5, server: 203.0.113.1, port: 1080, password: secret, interface-name: en0}\n - {name: exit, type: http, server: 203.0.113.2, port: 443, dialer-proxy: entry}\n")
 	bound, err := BindInterface(data, "en7")

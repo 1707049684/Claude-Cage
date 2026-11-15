@@ -87,14 +87,11 @@ func (o Options) ValidatePlatform(platform string) error {
 	return nil
 }
 
-// Hardware acceleration flags are applied only after a concrete hardware
-// backend has been selected. They do not change the driver-reported renderer
-// name; they keep page rasterization and Canvas compositing on the same GPU
-// path as WebGL. SwiftShader deliberately stays on the software path.
+// Request GPU rasterization and zero-copy uploads for explicit hardware
+// backends. Chromium still decides availability from the driver and blocklist.
 var hardwareAccelerationFlags = []string{
 	"--enable-gpu-rasterization",
 	"--enable-zero-copy",
-	"--enable-accelerated-2d-canvas",
 }
 
 func (p *Profile) GraphicsFlags() []string {
