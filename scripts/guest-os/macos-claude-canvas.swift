@@ -75,6 +75,23 @@ private func titleBarHeight(_ window: AXUIElement, _ frame: CGRect) -> CGFloat {
     return bottom < frame.height / 3 ? bottom : 0
 }
 
+// ImageIO compresses the whole window on the CPU. Callers run this off the
+// main actor, which also delivers input to the same window.
+private func encodedWindowFrame(_ content: CGImage, phoneJPEG: Bool) throws -> (data: Data, mime: String) {
+    var data = phoneJPEG ? try phoneDesktopJPEG(content) : try pngData(content)
+    var mime = phoneJPEG ? "image/jpeg" : "image/png"
+    if data.count >= 8<<20 {
+        // Preserve native glyph density and geometry even on photo-heavy windows.
+        mime = "image/jpeg"
+        for quality in [0.93, 0.84] {
+            data = try encodedImage(content, type:.jpeg, properties:[kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+            if data.count < 8<<20 { break }
+        }
+    }
+    guard data.count < 8<<20 else { throw Failure(8, "frame_limit") }
+    return (data, mime)
+}
+
 @MainActor
 final class ClaudeCanvasSession {
     static let shared = ClaudeCanvasSession()
@@ -167,20 +184,16 @@ final class ClaudeCanvasSession {
         guard let image = updated else { return ["unchanged": true, "sequence": sequence, "geometry": geometry] }
         let top = Int((layout.cropTop * CGFloat(image.height) / layout.frame.height).rounded())
         guard top >= 0, top < image.height,
-              let content = image.cropping(to: CGRect(x:0,y:top,width:image.width,height:image.height-top)),
-              try liveBounds(layout.id, layout.pid) == layout.frame,
-              try owns(layout.pid) else { throw Failure(7, "window_changed") }
-        var data = phoneJPEG ? try phoneDesktopJPEG(content) : try pngData(content)
-        var mime = phoneJPEG ? "image/jpeg" : "image/png"
-        if data.count >= 8<<20 {
-            // Preserve native glyph density and geometry even on photo-heavy windows.
-            mime = "image/jpeg"
-            for quality in [0.93, 0.84] {
-                data = try encodedImage(content, type:.jpeg, properties:[kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-                if data.count < 8<<20 { break }
-            }
+              let content = image.cropping(to: CGRect(x:0,y:top,width:image.width,height:image.height-top)) else {
+            throw Failure(7, "window_changed")
         }
-        guard data.count < 8<<20 else { throw Failure(8, "frame_limit") }
+        let encoded = try await Task.detached(priority: .userInitiated) {
+            try encodedWindowFrame(content, phoneJPEG: phoneJPEG)
+        }.value
+        let data = encoded.data, mime = encoded.mime
+        // The second ownership check covers the time spent encoding.
+        guard try liveBounds(layout.id, layout.pid) == layout.frame,
+              try owns(layout.pid) else { throw Failure(7, "window_changed") }
         var reply: [String:Any] = ["window":layout.id,"pid":layout.pid,"mime":mime,"sequence":sequence,
                 "contentWidth":layout.content.width,"contentHeight":layout.content.height,
                 "pixelWidth":content.width,"pixelHeight":content.height,"cropTop":layout.cropTop,
