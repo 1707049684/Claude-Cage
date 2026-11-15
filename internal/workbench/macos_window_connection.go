@@ -120,7 +120,12 @@ func (s *Server) macOSWindowConnection(w http.ResponseWriter, r *http.Request) {
 		if !validMacOSWindowRequest(message.Request) {
 			return
 		}
-		message.Request = macOSWindowClientRequest(message.Request, true, macOSBrowserWindowRoute(r))
+		browser := macOSBrowserWindowRoute(r)
+		if browser {
+			// The visible browser view sends status and input on this channel.
+			s.noteNativeBrowserUse()
+		}
+		message.Request = macOSWindowClientRequest(message.Request, true, browser)
 		body, err := json.Marshal(message.Request)
 		if err != nil || len(body) > 64<<10 {
 			return

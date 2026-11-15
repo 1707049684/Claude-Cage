@@ -25,6 +25,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -85,6 +86,7 @@ type Server struct {
 	browserControl                                   *browserClient
 	controlSession                                   guestSession
 	nativeControl                                    nativeControl
+	nativeBrowserUsed                                atomic.Int64
 	windowsBrowserControl                            *windowsBrowserClient
 	nativeDownloads                                  map[string]*nativeDownload
 	nativeDownloadSlots                              chan struct{}
