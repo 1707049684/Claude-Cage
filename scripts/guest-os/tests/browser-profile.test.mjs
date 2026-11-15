@@ -16,10 +16,19 @@ test("creation preferences accept only bounded typed fields", () => {
 });
 test("real graphics APIs are selected only for compatible guest platforms", () => {
   const native = { ...options, webgl: "native", canvas: "native" };
-  assert(browserProfileFlags({ ...native, graphics_backend: "metal" }, "darwin").includes("--use-angle=metal"));
-  assert(browserProfileFlags({ ...native, graphics_backend: "d3d11" }, "win32").includes("--use-angle=d3d11"));
-  assert(browserProfileFlags({ ...native, graphics_backend: "vulkan" }, "linux").includes("--use-angle=vulkan"));
-  assert(browserProfileFlags({ ...native, graphics_backend: "software" }, "linux").includes("--use-angle=swiftshader"));
+  const acceleration = ["--enable-gpu-rasterization", "--enable-zero-copy", "--enable-accelerated-2d-canvas"];
+  assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "metal" }, "darwin"),
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=metal", ...acceleration]);
+  assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "d3d11" }, "win32"),
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=d3d11", ...acceleration]);
+  assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "vulkan" }, "linux"),
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=vulkan", ...acceleration]);
+  assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "opengl" }, "linux"),
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=gl", ...acceleration]);
+  assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "software" }, "linux"),
+    ["--window-size=1280,800", "--use-gl=angle", "--use-angle=swiftshader"]);
+  assert.deepEqual(browserProfileFlags({ ...native, graphics_backend: "auto" }, "linux"),
+    ["--window-size=1280,800"]);
   assert.throws(() => browserProfileFlags({ ...native, graphics_backend: "metal" }, "win32"), { code: "invalid_configuration" });
   assert.throws(() => checkedBrowserProfile({ ...options, graphics_backend: "metal" }), { code: "invalid_configuration" });
   assert.deepEqual(checkedBrowserProfile({ ...native, graphics_backend: "auto" }), native);

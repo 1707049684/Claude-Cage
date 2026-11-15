@@ -87,15 +87,25 @@ func (o Options) ValidatePlatform(platform string) error {
 	return nil
 }
 
+// Hardware acceleration flags are applied only after a concrete hardware
+// backend has been selected. They do not change the driver-reported renderer
+// name; they keep page rasterization and Canvas compositing on the same GPU
+// path as WebGL. SwiftShader deliberately stays on the software path.
+var hardwareAccelerationFlags = []string{
+	"--enable-gpu-rasterization",
+	"--enable-zero-copy",
+	"--enable-accelerated-2d-canvas",
+}
+
 func (p *Profile) GraphicsFlags() []string {
 	if p == nil {
 		return nil
 	}
 	switch p.GraphicsBackend {
 	case "metal", "d3d11", "vulkan":
-		return []string{"--use-gl=angle", "--use-angle=" + p.GraphicsBackend}
+		return append([]string{"--use-gl=angle", "--use-angle=" + p.GraphicsBackend}, hardwareAccelerationFlags...)
 	case "opengl":
-		return []string{"--use-gl=angle", "--use-angle=gl"}
+		return append([]string{"--use-gl=angle", "--use-angle=gl"}, hardwareAccelerationFlags...)
 	case "software":
 		return []string{"--use-gl=angle", "--use-angle=swiftshader"}
 	}

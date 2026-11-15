@@ -163,9 +163,14 @@ function probe(path) {
       "get",
       "-inet",
       "198.18.0.254",
-    ]).match(/interface:\s*(en[0-9]+)\s*$/m)?.[1];
+    ]).match(
+      /interface:\s*((?:en|vmen|vmnet|bridge|tap|lima)[0-9]+)\s*$/m,
+    )?.[1];
     if (iface && input.run_id && input.check_id) {
-      result.ipv6_link_interface = iface;
+      // Keep the raw NIC name inside the guest process. The host only receives
+      // a validated boolean, so diagnostics and the safety report do not expose
+      // an interface name that could identify the virtual network layout.
+      result.ipv6_link_interface_valid = true;
       result.ipv6_link_sent =
         read(helper, ["link", iface, input.run_id, input.check_id]) === "sent";
     }
