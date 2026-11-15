@@ -136,12 +136,21 @@ final class ClaudeCanvasSession {
     private var last: ClaudeCanvas?
     private var token = ""
     private var requested: (id: CGWindowID, pid: pid_t, size: CGSize, observed: CGSize, time: Date)?
+    // Each accessibility query is a round trip into the application. What they
+    // report follows the window's geometry, which every frame reads anyway.
+    private var measured: (id: CGWindowID, pid: pid_t, bounds: CGRect, width: Int, height: Int, crop: CGFloat, resized: Bool, time: Date)?
 
     func layout(_ window: SCWindow, filter: SCContentFilter, width: Int, height: Int, scale: Double) async throws -> ClaudeCanvas {
         guard let pid = window.owningApplication?.processID,
               (320...2560).contains(width), (240...1600).contains(height),
               scale.isFinite, (1...2).contains(scale) else { throw Failure(8, "invalid_input") }
         var bounds = try liveBounds(window.windowID, pid)
+        let density = min(max(1,CGFloat(filter.pointPixelScale)), CGFloat(scale))
+        if let known = measured, known.id == window.windowID, known.pid == pid, known.bounds == bounds,
+           known.width == width, known.height == height, Date().timeIntervalSince(known.time) < 1 {
+            return ClaudeCanvas(id: window.windowID, pid: pid, frame: bounds, cropTop: known.crop,
+                                scale: density, resizable: known.resized)
+        }
         var crop: CGFloat = 0, resized = false
         if let ax = owningAXWindow(pid, bounds) {
             crop = cropHeight(ax, bounds)
@@ -173,8 +182,9 @@ final class ClaudeCanvasSession {
                 crop = cropHeight(ax, bounds)
             }
         }
+        measured = (window.windowID, pid, bounds, width, height, crop, resized, Date())
         return ClaudeCanvas(id: window.windowID, pid: pid, frame: bounds, cropTop: crop,
-                            scale: min(max(1,CGFloat(filter.pointPixelScale)), CGFloat(scale)), resizable: resized)
+                            scale: density, resizable: resized)
     }
 
     func record(_ value: ClaudeCanvas) -> String {
