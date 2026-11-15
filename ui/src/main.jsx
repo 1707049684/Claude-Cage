@@ -1883,7 +1883,7 @@ function App() {
             />
             <span className="status-spacer" />
             <AudioControls audio={audio} />
-            <EnvironmentClock timezone={settings.timezone} />
+            <EnvironmentClock timezone={settings.timezone} clock12Hour={settings.clock_12_hour} />
             <span className="status-feedback" role="status">
               <SafetyMessage message={toast ||
                 (busy
