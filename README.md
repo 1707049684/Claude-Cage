@@ -128,8 +128,13 @@ macOS 和已签名 Windows 版本支持通过所选代理更新；Windows 未签
 本项目仍在快速迭代中，欢迎加入交流群提意见，欢迎社区大佬一起维护
 
 <p align="center">
-  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ 群 · 782087179" width="240" /></a>
-  <br />QQ 群 · 782087179
+  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ 群 · 710792821" width="240" /></a>
+  <br />QQ 群 · 710792821
+</p>
+
+<p align="center">
+  <a href="assets/community-wechat.png"><img src="assets/community-wechat.png" alt="微信" width="240" /></a>
+  <br />微信
 </p>
 
 ## 来源与许可

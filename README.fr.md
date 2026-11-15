@@ -116,8 +116,13 @@ Pour l'index complet, voir [Index des documents](docs/README.md).
 Le projet évolue rapidement. Rejoignez le groupe communautaire pour partager vos commentaires ; les responsables de la communauté sont les bienvenus.
 
 <p align="center">
-  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ group · 782087179" width="240" /></a>
-  <br />QQ group · 782087179
+  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ group · 710792821" width="240" /></a>
+  <br />QQ group · 710792821
+</p>
+
+<p align="center">
+  <a href="assets/community-wechat.png"><img src="assets/community-wechat.png" alt="WeChat" width="240" /></a>
+  <br />WeChat
 </p>
 
 ## Origines et licences

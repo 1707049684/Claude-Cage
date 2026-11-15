@@ -116,8 +116,13 @@ macOS і падпісаныя версіі Windows абнаўляюцца пра
 Праект імкліва развіваецца. Далучайцеся да групы супольнасці, каб падзяліцца водгукамі; вітаюцца супрацоўнікі супольнасці.
 
 <p align="center">
-  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ group · 782087179" width="240" /></a>
-  <br />QQ group · 782087179
+  <a href="assets/community-qq.png"><img src="assets/community-qq.png" alt="QQ group · 710792821" width="240" /></a>
+  <br />QQ group · 710792821
+</p>
+
+<p align="center">
+  <a href="assets/community-wechat.png"><img src="assets/community-wechat.png" alt="WeChat" width="240" /></a>
+  <br />WeChat
 </p>
 
 ## Паходжанне і ліцэнзаванне
