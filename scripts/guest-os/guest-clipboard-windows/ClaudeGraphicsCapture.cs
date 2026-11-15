@@ -186,11 +186,11 @@ internal static class ClaudeGraphicsCapture
                     timestamp = frame.SystemRelativeTime;
                     return encoded!;
                 }
+                // The encoder writes exactly these pixels, so the emptiness
+                // check reads them here instead of decoding the PNG again.
+                if (!allowSolid && !HasContent(pixelsRead, pixels.PixelWidth, source.X, source.Y, width, height)) throw new InvalidDataException("desktop_empty_frame");
                 var png = await EncodeClient(pixels, source.X, source.Y, width, height);
                 validate();
-                using var input = new MemoryStream(png, false);
-                using var client = new Bitmap(input);
-                if (client.Width != width || client.Height != height || (!allowSolid && !HasContent(client))) throw new InvalidDataException("desktop_empty_frame");
                 // Publish the comparison pixels only after encoding and target
                 // validation succeed, so a failed frame cannot reuse old PNGs.
                 previousPixels ??= new byte[checked(rowBytes * height)];
@@ -229,6 +229,24 @@ internal static class ClaudeGraphicsCapture
             {
                 var pixel = bitmap.GetPixel(x, y);
                 if (Math.Abs(pixel.R-first.R)>8 || Math.Abs(pixel.G-first.G)>8 || Math.Abs(pixel.B-first.B)>8) varied++;
+            }
+        return varied >= 8;
+    }
+    // The same sampling over BGRA rows of a captured surface.
+    internal static bool HasContent(ReadOnlySpan<byte> bgra, int surfaceWidth, int originX, int originY, int width, int height)
+    {
+        if (width < 1 || height < 1 || originX < 0 || originY < 0 || originX + width > surfaceWidth ||
+            (long)(originY + height) * surfaceWidth * 4 > bgra.Length) return false;
+        int left = width / 12, right = width - left;
+        int top = height * 15 / 100, bottom = height * 95 / 100;
+        int At(int x, int y) => ((originY + y) * surfaceWidth + originX + x) * 4;
+        var first = At(left, top); int varied = 0;
+        byte blue = bgra[first], green = bgra[first + 1], red = bgra[first + 2];
+        for (int y = top; y < bottom; y += Math.Max(1, (bottom-top)/64))
+            for (int x = left; x < right; x += Math.Max(1, (right-left)/64))
+            {
+                var pixel = At(x, y);
+                if (Math.Abs(bgra[pixel + 2]-red)>8 || Math.Abs(bgra[pixel + 1]-green)>8 || Math.Abs(bgra[pixel]-blue)>8) varied++;
             }
         return varied >= 8;
     }

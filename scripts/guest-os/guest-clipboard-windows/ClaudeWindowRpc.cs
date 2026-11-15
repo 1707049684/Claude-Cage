@@ -67,9 +67,27 @@ internal static class ClaudeWindowRpc
     [DllImport("ole32.dll")] private static extern int OleInitialize(IntPtr reserved);
     [DllImport("ole32.dll")] private static extern void OleUninitialize();
 
+    // Every frame, pointer move and caret poll asks for the registration, and
+    // reading it enumerates the user's packages and parses a manifest. A valid
+    // answer is reused briefly; the running process and its window are still
+    // validated on every request, and a failed lookup is never remembered.
+    private static readonly object RegistrationLock = new();
+    private static Registration? knownRegistration;
+    private static long knownRegistrationAt;
     private static Registration? RegisteredExecutable()
     {
-        var packages = new PackageManager().FindPackagesForUser("").Where(p => p.Id.FamilyName == Family).ToArray();
+        lock (RegistrationLock)
+            if (knownRegistration is not null && Environment.TickCount64 - knownRegistrationAt < 2000) return knownRegistration;
+        Registration? found;
+        try { found = ReadRegistration(); }
+        catch { lock (RegistrationLock) knownRegistration = null; throw; }
+        lock (RegistrationLock) { knownRegistration = found; knownRegistrationAt = Environment.TickCount64; }
+        return found;
+    }
+
+    private static Registration? ReadRegistration()
+    {
+        var packages = new PackageManager().FindPackagesForUser("", Family).ToArray();
         if (packages.Length == 0) return null;
         if (packages.Length != 1) throw new InvalidDataException("desktop_registration_invalid");
         var p = packages[0];
