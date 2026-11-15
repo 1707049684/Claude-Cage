@@ -128,6 +128,9 @@ func Run(configPath string, args []string, output io.Writer) int {
 		emit()
 		return 0
 	}
+	if runtime.GOOS == "linux" {
+		return fail(errors.New("Linux 版本使用系统安装包更新，请从发布页面下载新版 .deb"))
+	}
 	digest, err := releaseDigest(metadata, client, *c)
 	if err != nil {
 		return fail(err)
@@ -314,6 +317,9 @@ func archiveName(version, goos, goarch string) (string, error) {
 		return "Cage-" + version + "-macos-arm64.dmg", nil
 	case goos == "windows" && goarch == "amd64":
 		return "Cage-" + version + "-windows-amd64-setup.exe", nil
+	// Linux only learns that a newer package exists; the system installs it.
+	case goos == "linux" && goarch == "amd64":
+		return "Cage-" + version + "-linux-amd64.deb", nil
 	default:
 		return "", errors.New("此平台尚无 Cage 应用内更新发行包")
 	}

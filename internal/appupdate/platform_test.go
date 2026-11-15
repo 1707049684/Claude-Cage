@@ -20,6 +20,13 @@ func TestPlatformReleaseNeverInstallsAnotherPlatform(t *testing.T) {
 	if c, err := selectPlatformRelease([]release{fixtureRelease("0.2.0", false)}, "0.1.0", "windows", "amd64"); err != nil || c != nil {
 		t.Fatalf("macOS package selected on Windows: %#v %v", c, err)
 	}
+	linuxAsset := windowsAsset
+	linuxAsset.Name = "Cage-0.2.0-linux-amd64.deb"
+	linuxAsset.URL = "https://github.com/" + repository + "/releases/download/v0.2.0/" + linuxAsset.Name
+	r.Assets = append(r.Assets, linuxAsset)
+	if c, err := selectPlatformRelease([]release{r}, "0.1.0", "linux", "amd64"); err != nil || c == nil || c.Archive.Name != linuxAsset.Name {
+		t.Fatalf("Linux must learn about its newer package: %#v %v", c, err)
+	}
 	if _, err := selectPlatformRelease([]release{r}, "0.1.0", "windows", "arm64"); err == nil {
 		t.Fatal("unsupported architecture appeared up to date")
 	}
