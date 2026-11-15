@@ -88,8 +88,34 @@ private final class ClaudePicker: NSObject, SCContentSharingPickerObserver {
     nonisolated func contentSharingPickerStartDidFailWithError(_ error: Error) {}
 }
 
+// Listing shareable content asks the window server about every window, and
+// each frame, pointer move and key press needs the Claude window. The window
+// found last is reused for a second while it is still the same on-screen
+// window of a verified Claude process at the same position and size.
 @MainActor
-func selectedWindow() async throws -> (SCWindow, SCContentFilter?) {
+private enum RecentClaudeWindow {
+    static var window: SCWindow?
+    static var found: TimeInterval = 0
+
+    static func current() throws -> SCWindow? {
+        guard let window = window, ProcessInfo.processInfo.systemUptime - found < 1 else { return nil }
+        try requireGuest()
+        let pids = try claudePIDs()
+        guard CGPreflightScreenCaptureAccess(),
+              let owner = window.owningApplication, pids.contains(owner.processID),
+              let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], window.windowID) as? [[String:Any]],
+              let exact = list.first, exact[kCGWindowOwnerPID as String] as? Int32 == owner.processID,
+              exact[kCGWindowIsOnscreen as String] as? Bool == true,
+              let box = exact[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: box),
+              abs(bounds.minX - window.frame.minX) < 1, abs(bounds.minY - window.frame.minY) < 1,
+              abs(bounds.width - window.frame.width) < 1, abs(bounds.height - window.frame.height) < 1 else { return nil }
+        return window
+    }
+}
+
+@MainActor
+func selectedWindow(fresh: Bool = false) async throws -> (SCWindow, SCContentFilter?) {
     if #available(macOS 15.2, *), let filter = ClaudePicker.shared.selection, let window = filter.includedWindows.first {
         let pids = try claudePIDs()
         guard let owner = window.owningApplication, pids.contains(owner.processID) else { throw Failure(7, "window_changed") }
@@ -99,7 +125,12 @@ func selectedWindow() async throws -> (SCWindow, SCContentFilter?) {
               exact[kCGWindowIsOnscreen as String] as? Bool == true else { throw Failure(7, "window_changed") }
         return (window, filter)
     }
-    return (try await claudeWindow(), nil)
+    if !fresh, let window = try RecentClaudeWindow.current() { return (window, nil) }
+    RecentClaudeWindow.window = nil
+    let window = try await claudeWindow()
+    RecentClaudeWindow.window = window
+    RecentClaudeWindow.found = ProcessInfo.processInfo.systemUptime
+    return (window, nil)
 }
 
 @MainActor
@@ -253,9 +284,9 @@ private func handle(_ input: Request, inputSession: MacWindowInputSession) async
         }
     } else if input.surface != nil { throw Failure(8, "unknown_surface") }
     let canvas = browser ? ClaudeCanvasSession.browser : ClaudeCanvasSession.shared
-    func targetWindow() async throws -> (SCWindow, SCContentFilter?) {
+    func targetWindow(fresh: Bool = false) async throws -> (SCWindow, SCContentFilter?) {
         if browser { return (try await MacChromeWindow.shared.window(), nil) }
-        return try await selectedWindow()
+        return try await selectedWindow(fresh: fresh)
     }
     if input.action.hasPrefix("phone-") {
         return try await MacPhoneDesktop.shared.handle(input)
@@ -363,7 +394,7 @@ private func handle(_ input: Request, inputSession: MacWindowInputSession) async
             // surface. Reacquire that exact window before the first new frame.
             var target = window, source = capture
             if abs(window.frame.width - layout.frame.width) >= 1 || abs(window.frame.height - layout.frame.height) >= 1 {
-                let (fresh, selection) = try await targetWindow()
+                let (fresh, selection) = try await targetWindow(fresh: true)
                 guard fresh.windowID == layout.id, fresh.owningApplication?.processID == layout.pid else {
                     throw Failure(7, "window_changed")
                 }
