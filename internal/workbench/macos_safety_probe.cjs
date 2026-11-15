@@ -128,7 +128,7 @@ function probe(path) {
           !flags.includes("I") ||
           !gateway.startsWith("fe80:")
         )
-          return { name };
+          return { routeVerified: false };
         const detail = read("/sbin/route", [
           "-n",
           "get",
@@ -151,7 +151,7 @@ function probe(path) {
             boundIndex: data.boundIndex,
           };
         } catch {
-          return { name };
+          return { routeVerified: false };
         }
       }),
     );
