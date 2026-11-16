@@ -1,0 +1,46 @@
+name: Build CageMobile iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-ios.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies
+        run: npm ci --prefix ui
+      - name: Build CageMobile iOS app and package unsigned IPA
+        run: |
+          bash mobile/build.sh ios
+          xcodebuild -project mobile/ios/CageMobile.xcodeproj -target CageMobile -sdk iphoneos -configuration Release \
+            CODE_SIGNING_ALLOWED=NO SYMROOT="$PWD/mobile/.build/ios/products" OBJROOT="$PWD/mobile/.build/ios/obj" build
+          mkdir -p _ipa_out/Payload
+          cp -R mobile/.build/ios/products/Release-iphoneos/CageMobile.app _ipa_out/Payload/CageMobile.app
+          (cd _ipa_out && ditto -c -k --sequesterRsrc --keepParent Payload CageMobile.ipa)
+          ls -lh _ipa_out/CageMobile.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CageMobile.ipa
+          path: _ipa_out/CageMobile.ipa
+          if-no-files-found: error
+          overwrite: true
